@@ -2,7 +2,7 @@
 Application utility module
 """
 
-# Copyright 2023 Silicon Laboratories Inc. www.silabs.com
+# Copyright 2025 Silicon Laboratories Inc. www.silabs.com
 #
 # SPDX-License-Identifier: Zlib
 #
@@ -31,7 +31,6 @@ import os.path
 import socket
 import sys
 import threading
-import traceback
 import bgapi
 from bgapi.connector import ConnectorException
 import serial.tools.list_ports
@@ -77,7 +76,6 @@ class GenericApp(threading.Thread):
     def run(self):
         """ Main execution loop of the application. """
         self._run.set()
-        exit_code = 0
 
         self.log.info("Open device")
         try:
@@ -90,8 +88,8 @@ class GenericApp(threading.Thread):
         threading.Thread(target=self.watchdog, daemon=True).start()
 
         # Enter main program loop.
-        while self._run.is_set():
-            try:
+        try:
+            while self._run.is_set():
                 # The timeout is needed to get the KeyboardInterrupt.
                 # On Windows hosts, timeout is needed in both threaded and non-threaded modes.
                 # On POSIX hosts, timeout is needed only in threaded mode.
@@ -118,21 +116,12 @@ class GenericApp(threading.Thread):
                 event_callback = getattr(self, evt._str, None)
                 if event_callback is not None:
                     event_callback(evt)
-            except bgapi.bglib.CommandFailedError as err:
-                # Get additional info from trace.
-                trace = traceback.extract_tb(sys.exc_info()[-1])[-3]
-                self.log.error("%s", err)
-                self.log.error("  File '%s', line %d, in %s", trace.filename, trace.lineno, trace.name)
-                self.log.error("    %s", trace.line)
-                self._run.clear()
-                exit_code = -1
-            except KeyboardInterrupt:
-                self.log.info("User interrupt")
-                self._run.clear()
-
-        self.log.info("Close device")
-        self.lib.close()
-        sys.exit(exit_code)
+        except KeyboardInterrupt:
+            self.log.info("User interrupt")
+        finally:
+            self._run.clear()
+            self.log.info("Close device")
+            self.lib.close()
 
     def stop(self):
         """ Terminate main execution loop. """
@@ -171,7 +160,7 @@ class BluetoothApp(GenericApp):
             self.ready.set()
             # Check Bluetooth stack version
             version = "{major}.{minor}.{patch}".format(**vars(evt))
-            self.log.info("Bluetooth stack booted: v%s-b%s", version, evt.build)
+            self.log.info("Bluetooth stack booted: v%s+%08x", version, evt.hash)
             if version != self.lib.bt.__version__:
                 self.log.warning("BGAPI version mismatch: %s (target) != %s (host)", version, self.lib.bt.__version__)
             # Get Bluetooth address
@@ -196,7 +185,7 @@ class BtMeshApp(GenericApp):
             self.ready.set()
             # Check Bluetooth stack version
             version = "{major}.{minor}.{patch}".format(**vars(evt))
-            self.log.info("Bluetooth stack booted: v%s-b%s", version, evt.build)
+            self.log.info("Bluetooth stack booted: v%s+%08x", version, evt.hash)
             if version != self.lib.bt.__version__:
                 self.log.warning("BGAPI version mismatch: %s (target) != %s (host)", version, self.lib.bt.__version__)
             # Initialize Bluetooth Mesh device
@@ -271,15 +260,6 @@ class ArgumentParser(argparse.ArgumentParser):
             choices=logging._nameToLevel.keys(),
             help="Log level",
             default="INFO")
-        self.add_argument(
-            "--robust",
-            help="Enable robust communication",
-            action="store_true")
-        self.add_argument(
-            "--no_crc",
-            dest="robust_crc",
-            help="Disable CRC checking for robust communication. Ignored if robust communication is disabled.",
-            action="store_false")
 
     def parse_args(self, *args, **kwargs):
         """ Implement special argument parsing rules """
@@ -348,9 +328,6 @@ def get_connector(args=None):
             connector.append(cpc_conn)
     if args.conn:
         connector += [connector_from_str(conn) for conn in args.conn]
-    if args.robust:
-        # Enable robust layer on all connectors
-        connector = [bgapi.RobustConnector(conn, args.robust_crc) for conn in connector]
     if args.single_mode:
         return connector[0]
     return connector

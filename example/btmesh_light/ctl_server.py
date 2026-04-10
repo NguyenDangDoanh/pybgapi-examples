@@ -3,7 +3,7 @@
 BtMesh NCP Light Server, CTL Model implementation.
 """
 
-# Copyright 2022 Silicon Laboratories Inc. www.silabs.com
+# Copyright 2025 Silicon Laboratories Inc. www.silabs.com
 #
 # SPDX-License-Identifier: Zlib
 #
@@ -55,10 +55,10 @@ class CTLServer(LightnessServer):
     @dataclass
     class CTLLightbulbTemperature:
         """ Dataclass of CTL lightbulb Tempereature state. """
-        # Current temperature value
-        temperature_current = 0
-        # Target temperature value
-        temperature_target = 0
+        # Current temperature value - initialize with default
+        temperature_current = 6500
+        # Target temperature value - initialize with default
+        temperature_target = 6500
         # Default temperature value
         temperature_default = 6500
         # Minimum temperature value
@@ -174,12 +174,9 @@ class CTLServer(LightnessServer):
 
         if self.delayed_ctl_trans == 0:
             # No transition delay, update state immediately
-            self.CTLLightbulbLightness.lightness_current = (
-                self.CTLLightbulbLightness.lightness_target)
-            self.CTLLightbulbTemperature.temperature_current = (
-                self.CTLLightbulbTemperature.temperature_target)
-            self.CTLLightbulDeltaUV.deltauv_current = (
-                self.CTLLightbulDeltaUV.deltauv_target)
+            self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
+            self.CTLLightbulbTemperature.temperature_current = self.CTLLightbulbTemperature.temperature_target
+            self.CTLLightbulDeltaUV.deltauv_current = self.CTLLightbulDeltaUV.deltauv_target
             # Save the state in flash after a small delay
             self.ctl_nvm_save_timer_start()
             self.ctl_update_and_publish(0, self.delayed_ctl_trans)
@@ -266,12 +263,9 @@ class CTLServer(LightnessServer):
     def ctl_transition_complete(self):
         """ Callback to Light CTL request with non-zero transition time. """
         self.log.info("CTL transition complete")
-        self.CTLLightbulbLightness.lightness_current = (
-            self.CTLLightbulbLightness.lightness_target)
-        self.CTLLightbulbTemperature.temperature_current = (
-            self.CTLLightbulbTemperature.temperature_target)
-        self.CTLLightbulDeltaUV.deltauv_current = (
-            self.CTLLightbulDeltaUV.deltauv_target)
+        self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
+        self.CTLLightbulbTemperature.temperature_current = self.CTLLightbulbTemperature.temperature_target
+        self.CTLLightbulDeltaUV.deltauv_current = self.CTLLightbulDeltaUV.deltauv_target
 
         self.log.info("Transition complete. New lightness is " +
                       f"{self.CTLLightbulbLightness.lightness_current} " +
@@ -354,8 +348,7 @@ class CTLServer(LightnessServer):
             self.log.info(f"Lightness update same value, {lightness_actual}")
         else:
             self.log.info(
-                f"Lightness value update: from {self.CTLLightbulbLightness.lightness_current} \
-                to {lightness_actual}"
+                f"Lightness value update: from {self.CTLLightbulbLightness.lightness_current} to {lightness_actual}"
             )
             self.CTLLightbulbLightness.lightness_current = lightness_actual
             # Save the state in flash after a small delay
@@ -392,14 +385,10 @@ class CTLServer(LightnessServer):
 
     def set_temperature_deltauv_level(self, temperature, delta_uv):
         """ Set GUI temperature and delta UV in given transition time. """
-        if (self.CTLLightbulbTemperature.temperature_current <
-            self.CTLLightbulbTemperature.temperature_min):
-            self.CTLLightbulbTemperature.temperature_current = \
-            self.CTLLightbulbTemperature.temperature_min
-        elif (self.CTLLightbulbTemperature.temperature_current >
-              self.CTLLightbulbTemperature.temperature_max):
-            self.CTLLightbulbTemperature.temperature_current = \
-            self.CTLLightbulbTemperature.temperature_max
+        if self.CTLLightbulbTemperature.temperature_current < self.CTLLightbulbTemperature.temperature_min:
+            self.CTLLightbulbTemperature.temperature_current = self.CTLLightbulbTemperature.temperature_min
+        elif self.CTLLightbulbTemperature.temperature_current > self.CTLLightbulbTemperature.temperature_max:
+            self.CTLLightbulbTemperature.temperature_current = self.CTLLightbulbTemperature.temperature_max
 
         MainPage.get_instance(self).set_temperature_value(temperature)
         MainPage.get_instance(self).set_delta_uv_value(self.display_delta_uv(delta_uv))

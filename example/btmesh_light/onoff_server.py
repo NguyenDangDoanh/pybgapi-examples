@@ -3,7 +3,7 @@
 BtMesh NCP Light Server, OnOff Model implementation.
 """
 
-# Copyright 2022 Silicon Laboratories Inc. www.silabs.com
+# Copyright 2025 Silicon Laboratories Inc. www.silabs.com
 #
 # SPDX-License-Identifier: Zlib
 #
@@ -75,8 +75,8 @@ class OnOffServer(BtMeshApp):
         lightness_min = 0x0001
         # Maximum lightness value
         lightness_max = 0xFFFF 
-        # Minimum brightness
-        min_brightness = 0
+        # Switched OFF
+        lightness_off = 0
 
     @dataclass
     class CTLLightbulbOnOff:
@@ -101,24 +101,20 @@ class OnOffServer(BtMeshApp):
         if self.CTLLightbulbOnOff.onoff_current == request_state:
             self.log.info("Request for current state received.")
         else:
-            onoff_message = "ON" if request_state == 1 else "OFF"
-            self.log.info(f"Turning lightbulb {onoff_message}")
             # Set target value
             self.CTLLightbulbOnOff.onoff_target = request_state
             # Immediate change
             if event.transition_ms == 0 and event.delay_ms == 0:
-                self.CTLLightbulbOnOff.onoff_current = request_state
+                onoff_message = "ON" if request_state == 1 else "OFF"
+                self.log.info(f"Turning lightbulb {onoff_message}")
 
                 if self.CTLLightbulbOnOff.onoff_current == STATE_OFF:
                     self.CTLLightbulbLightness.lightness_target = 0
-                    self.CTLLightbulbLightness.lightness_current = (
-                        self.CTLLightbulbLightness.lightness_target)
+                    self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
                 else:
                     # Restore last brightness
-                    self.CTLLightbulbLightness.lightness_target = (
-                        self.CTLLightbulbLightness.lightness_last)
-                    self.CTLLightbulbLightness.lightness_current = (
-                        self.CTLLightbulbLightness.lightness_target)
+                    self.CTLLightbulbLightness.lightness_target = self.get_last_lightness()
+                    self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
 
                 self.lighting_set_level(self.CTLLightbulbLightness.lightness_target,
                                         IMMEDIATE)
@@ -130,19 +126,18 @@ class OnOffServer(BtMeshApp):
                                 self.delayed_onoff_request).start()
 
             else:
+                onoff_message = "ON" if request_state == 1 else "OFF"
+                self.log.info(f"Turning lightbulb {onoff_message} with transition ({self.delayed_onoff_trans}) ms")
                 # No delay but transition time has been set.
                 if self.CTLLightbulbOnOff.onoff_target == STATE_ON:
                     self.CTLLightbulbOnOff.onoff_current = STATE_ON
-
                 self.onoff_update(event.elem_index, event.transition_ms)
 
                 if request_state == STATE_OFF:
                     self.CTLLightbulbLightness.lightness_target = 0
-
                 else:
                     # Restore last brightness
-                    self.CTLLightbulbLightness.lightness_target = (
-                        self.CTLLightbulbLightness.lightness_last)
+                    self.CTLLightbulbLightness.lightness_target = self.get_last_lightness()
 
                 self.lighting_set_level(self.CTLLightbulbLightness.lightness_target,
                                         event.transition_ms)
@@ -174,30 +169,25 @@ class OnOffServer(BtMeshApp):
 
         if self.delayed_onoff_trans == 0:
             # No transition delay, update state immediately
-            self.CTLLightbulbOnOff.onoff_current = (
-                self.CTLLightbulbOnOff.onoff_target)
+            self.CTLLightbulbOnOff.onoff_current = self.CTLLightbulbOnOff.onoff_target
             if self.CTLLightbulbOnOff.onoff_current == STATE_OFF:
-                self.lighting_set_level(self.min_brightness, self.delayed_onoff_trans)
+                self.lighting_set_level(self.CTLLightbulbLightness.lightness_off, IMMEDIATE)
             else:
                 # Restore last brightness level
-                self.lighting_set_level(self.CTLLightbulbLightness.lightness_last,
-                                        IMMEDIATE)
-                self.CTLLightbulbLightness.lightness_current = (
-                    self.CTLLightbulbLightness.lightness_last)
-                self.CTLLightbulbLightness.lightness_target = (
-                    self.CTLLightbulbLightness.lightness_last)
+                self.lighting_set_level(self.get_last_lightness(), IMMEDIATE)
+                self.CTLLightbulbLightness.lightness_current = self.get_last_lightness()
+                self.CTLLightbulbLightness.lightness_target = self.get_last_lightness()
 
             # Save the state in flash after a small delay
             self.lighting_nvm_save_timer_start()
-            self.onoff_update_and_publish(0, self.delayed_onoff_trans)
+            self.onoff_update_and_publish(0, IMMEDIATE)
 
         else:
-            # Delay and transition time is greather than 0
+            # Delay and transition time is greater than 0
             if self.CTLLightbulbOnOff.onoff_target == STATE_OFF:
                 self.CTLLightbulbLightness.lightness_target = 0
             else:
-                self.CTLLightbulbLightness.lightness_target = (
-                    self.CTLLightbulbLightness.lightness_last)
+                self.CTLLightbulbLightness.lightness_target = self.get_last_lightness()
                 self.CTLLightbulbOnOff.onoff_current = STATE_ON
 
                 self.onoff_update(0, self.delayed_onoff_trans)
@@ -258,10 +248,8 @@ class OnOffServer(BtMeshApp):
     def onoff_transition_complete(self):
         """ Callback to light on/off request with non-zero transition time. """
         # Transition done -> set state, update and publish
-        self.CTLLightbulbOnOff.onoff_current = (
-            self.CTLLightbulbOnOff.onoff_target)
-        onoff_message = (
-            "ON" if self.CTLLightbulbOnOff.onoff_current == 1 else "OFF")
+        self.CTLLightbulbOnOff.onoff_current = self.CTLLightbulbOnOff.onoff_target
+        onoff_message = "ON" if self.CTLLightbulbOnOff.onoff_current == 1 else "OFF"
         self.log.info(f"{onoff_message}")
         # Save the state in flash after a small delay
         self.lighting_nvm_save_timer_start()
@@ -270,8 +258,7 @@ class OnOffServer(BtMeshApp):
     def onoff_recall(self, event):
         """ Handle generic on/off recall events. """
         request_state = int.from_bytes(event.parameters, byteorder="little")
-        if (self.CTLLightbulbOnOff.onoff_current
-            == self.CTLLightbulbOnOff.onoff_target):
+        if self.CTLLightbulbOnOff.onoff_current == self.CTLLightbulbOnOff.onoff_target:
             self.log.info("Request for current OnOff state received.")
         else:
             onoff_message = "ON" if request_state == 1 else "OFF"
@@ -279,8 +266,7 @@ class OnOffServer(BtMeshApp):
 
             self.CTLLightbulbOnOff.onoff_target = request_state
             if event.transition_time_ms == IMMEDIATE:
-                self.CTLLightbulbOnOff.onoff_current = (
-                    self.CTLLightbulbOnOff.onoff_target)
+                self.CTLLightbulbOnOff.onoff_current = self.CTLLightbulbOnOff.onoff_target
             else:
                 if self.CTLLightbulbOnOff.onoff_target == STATE_ON:
                     self.CTLLightbulbOnOff.onoff_current = STATE_ON
@@ -312,16 +298,21 @@ class OnOffServer(BtMeshApp):
 
     def lighting_set_level(self, level, trans_ms):
         """ Set GUI lightness level in given transition time. """
+        self.log.info(f"lighting_set_level ({level})")
         self.lightness_current = level
         temp = MainPage.get_instance(self).CTLLightbulbState.temperature_value.get()
         temperature = self.temperature_to_rgb(temp)
-        color = self.rgb_to_lightnessrgb(temperature, self.CTLLightbulbLightness.lightness_current)
+        color = self.rgb_to_lightnessrgb(temperature, self.lightness_current)
         MainPage.get_instance(self).set_lightness_value(
-            self.actual_value_to_precentage(self.CTLLightbulbLightness.lightness_current)
+            self.actual_value_to_precentage(self.lightness_current)
         )
         MainPage.get_instance(self).fade(
             MainPage.get_instance(self).lightbulb_image, color, trans_ms
         )
+    
+    def get_last_lightness(self):
+        """ Get the last known nonzero lightness value, or 100%"""
+        return self.CTLLightbulbLightness.lightness_last if self.CTLLightbulbLightness.lightness_last != self.CTLLightbulbLightness.lightness_off else self.CTLLightbulbLightness.lightness_max
 
     ##### HELPER FUNCTIONS #####
 

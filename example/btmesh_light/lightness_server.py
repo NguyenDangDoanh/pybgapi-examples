@@ -3,7 +3,7 @@
 BtMesh NCP Light Server, Lightness Model implementation.
 """
 
-# Copyright 2022 Silicon Laboratories Inc. www.silabs.com
+# Copyright 2025 Silicon Laboratories Inc. www.silabs.com
 #
 # SPDX-License-Identifier: Zlib
 #
@@ -190,11 +190,9 @@ class LightnessServer(OnOffServer):
                                 self.LightnessServerTiming.delayed_lightness_trans)
         if self.LightnessServerTiming.delayed_lightness_trans == 0:
             # No transition delay, update state immediately
-            self.CTLLightbulbLightness.lightness_current = (
-                self.CTLLightbulbLightness.lightness_target)
+            self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
             if self.CTLLightbulbLightness.lightness_target != 0:
-                self.CTLLightbulbLightness.lightness_last = (
-                    self.CTLLightbulbLightness.lightness_target)
+                self.CTLLightbulbLightness.lightness_last = self.CTLLightbulbLightness.lightness_target
 
             # Save the state in flash after a small delay
             self.lighting_nvm_save_timer_start()
@@ -216,7 +214,7 @@ class LightnessServer(OnOffServer):
 
         self.lib.btmesh.generic_server.update(
             elem_index,
-            model.BTMESH_LIGHTING_CTL_TEMPERATURE_SERVER_MODEL_ID,
+            model.BTMESH_LIGHTING_LIGHTNESS_SERVER_MODEL_ID,
             remaining_ms,
             self.lightness_kind,
             lightness,
@@ -224,8 +222,7 @@ class LightnessServer(OnOffServer):
 
     def lightness_response(self, elem_index, client_addr, appkey_index, remaining_ms):
         """Response to light lightness request."""
-        if (self.lightness_kind
-            == self.lib.btmesh.generic_client.GET_STATE_TYPE_STATE_LIGHTNESS_ACTUAL):
+        if self.lightness_kind == self.lib.btmesh.generic_client.GET_STATE_TYPE_STATE_LIGHTNESS_ACTUAL:
             lightness = struct.pack(
                 "<HH",
                 self.CTLLightbulbLightness.lightness_current,
@@ -266,13 +263,9 @@ class LightnessServer(OnOffServer):
 
     def lighting_transition_complete(self):
         """ Callback to light lightness request with non-zero transition time. """
-        self.CTLLightbulbLightness.lightness_current = (
-            self.CTLLightbulbLightness.lightness_target
-        )
+        self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
         if self.CTLLightbulbLightness.lightness_target != 0:
-            self.CTLLightbulbLightness.lightness_last = (
-                self.CTLLightbulbLightness.lightness_target
-            )
+            self.CTLLightbulbLightness.lightness_last = self.CTLLightbulbLightness.lightness_target
         self.log.info("Transition complete. New level is " +
                       f"{self.CTLLightbulbLightness.lightness_current}")
         # Save the state in flash after a small delay
@@ -289,8 +282,7 @@ class LightnessServer(OnOffServer):
         actual_request = int.from_bytes(event.parameters, byteorder="little")
         self.CTLLightbulbLightness.lightness_target = actual_request
 
-        if (self.CTLLightbulbLightness.lightness_current
-            == self.CTLLightbulbLightness.lightness_target):
+        if self.CTLLightbulbLightness.lightness_current == self.CTLLightbulbLightness.lightness_target:
             self.log.info("Request for current Light Lightness state received.")
         else:
             self.log.info(f"Recall lightness to {self.CTLLightbulbLightness.lightness_target} \
@@ -299,8 +291,7 @@ class LightnessServer(OnOffServer):
                                     event.transition_time_ms)
 
             if event.transition_time_ms == IMMEDIATE:
-                self.CTLLightbulbLightness.lightness_current = (
-                    self.CTLLightbulbLightness.lightness_target)
+                self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
             else:
                 # Lightbulb current state will be updated when transition is complete
                 threading.Timer(event.transition_time_ms * 0.001,
@@ -319,26 +310,26 @@ class LightnessServer(OnOffServer):
 
         param = event.parameters
         length = len(event.parameters)
-        if length > 2:
-            current = (param[1] << 8) + param[0]
+        if length >= 2:
+            # A simple 'change to' event has 2 bytes
+            # A 'change from - to' event has 4 bytes
+            # The last 2 bytes will be the 'to' parameter in every case
+            current = (param[-1] << 8) + param[-2]
         else:
             current = self.CTLLightbulbLightness.lightness_last
 
         self.log.info(f"Lightness change to {current}")
-        self.lightness_kind = (
-            self.lib.btmesh.generic_client.GET_STATE_TYPE_STATE_LIGHTNESS_ACTUAL)
+        self.lightness_kind = self.lib.btmesh.generic_client.GET_STATE_TYPE_STATE_LIGHTNESS_ACTUAL
         self.CTLLightbulbLightness.lightness_target = current
 
-        if (self.CTLLightbulbLightness.lightness_current
-            == self.CTLLightbulbLightness.lightness_target):
+        if (self.CTLLightbulbLightness.lightness_current == self.CTLLightbulbLightness.lightness_target:
             self.log.info("Request for current Light Lightness state received: " +
                 f"{self.CTLLightbulbLightness.lightness_current}.")
         else:
             self.log.info("Lightness update from " +
                           f"{self.CTLLightbulbLightness.lightness_current} " +
                           f"to {self.CTLLightbulbLightness.lightness_target}")
-            self.CTLLightbulbLightness.lightness_current = (
-                self.CTLLightbulbLightness.lightness_target)
+            self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
             self.lighting_nvm_save_timer_start()
 
     def pri_level_request(self, event):
@@ -385,8 +376,7 @@ class LightnessServer(OnOffServer):
 
             remaining_ms = event.delay_ms + event.transition_ms
 
-        elif (event.type
-            == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL_MOVE):
+        elif (event.type == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL_MOVE:
             self.log.info(f"Pri_level_request (move): delta = {self.request_level}, " +
                 f"transition = {event.transition_ms}, delay = {event.delay_ms}")
             # Store move
@@ -420,29 +410,23 @@ class LightnessServer(OnOffServer):
                     self.pri_level_target = requested_level
                     self.CTLLightbulbLightness.lightness_target = lightness
 
-                    remaining_delta = (
-                        self.pri_level_target - self.pri_level_current)
+                    remaining_delta = self.pri_level_target - self.pri_level_current
                     self.pri_level_move_schedule_next_request(remaining_delta)
 
                 remaining_ms = self.LightnessServerTiming.unknown_remaining_time
                 # State has changed, so the current scene number is reset
                 self.lib.btmesh.scene_server.reset_register(event.elem_index)
 
-        elif (event.type
-            == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL_HALT):
+        elif event.type == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL_HALT:
             if event.delay_ms > 0:
                 remaining_ms = event.delay_ms
                 threading.Timer(event.delay_ms * 0.001,
                                 self.delayed_pri_level_request).start()
             else:
-                self.CTLLightbulbLightness.lightness_current = (
-                    self.CTLLightbulbLightness.lightness_current)
-                self.CTLLightbulbLightness.lightness_target = (
-                    self.CTLLightbulbLightness.lightness_current)
-                self.pri_level_current = (
-                    self.pri_level_current)
-                self.CTLLightbulbLightness.pri_level_target = (
-                    self.pri_level_current)
+                self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_current
+                self.CTLLightbulbLightness.lightness_target = self.CTLLightbulbLightness.lightness_current
+                self.pri_level_current = self.pri_level_current
+                self.CTLLightbulbLightness.pri_level_target = self.pri_level_current
                 self.pri_level_move_stop()
                 self.lighting_set_level(
                     self.CTLLightbulbLightness.lightness_current, IMMEDIATE)
@@ -468,18 +452,15 @@ class LightnessServer(OnOffServer):
                       f"{self.CTLLightbulbLightness.pri_level_target}, " +
                       f"{self.LightnessServerTiming.delayed_pri_level_trans} ms")
 
-        if (self.pri_level_request_kind
-            == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL):
+        if (self.pri_level_request_kind == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL:
             self.lighting_set_level(self.CTLLightbulbLightness.lightness_target,
                                     self.LightnessServerTiming.delayed_pri_level_trans)
             if self.LightnessServerTiming.delayed_pri_level_trans == 0:
                 self.pri_level_current = self.pri_level_target
-                self.CTLLightbulbLightness.lightness_current = (
-                    self.CTLLightbulbLightness.lightness_target)
+                self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
 
                 if self.CTLLightbulbLightness.lightness_target != 0:
-                    self.CTLLightbulbLightness.lightness_last = (
-                        self.CTLLightbulbLightness.lightness_target)
+                    self.CTLLightbulbLightness.lightness_last = self.CTLLightbulbLightness.lightness_target
 
                 # Save the state in flash after a small delay
                 self.lighting_nvm_save_timer_start()
@@ -490,26 +471,19 @@ class LightnessServer(OnOffServer):
                 threading.Timer(self.LightnessServerTiming.delayed_pri_level_trans * 0.001,
                                 self.lighting_transition_complete).start()
 
-        elif (self.pri_level_request_kind
-            == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL_MOVE):
+        elif self.pri_level_request_kind == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL_MOVE:
             self.pri_level_move_schedule_next_request(
                 self.pri_level_target
                 - self.pri_level_current)
             self.pri_level_update_and_publish(0, self.LightnessServerTiming.unknown_remaining_time)
 
-        elif (self.pri_level_request_kind
-            == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL_HALT):
-            self.CTLLightbulbLightness.lightness_current = (
-                self.CTLLightbulbLightness.lightness_current)
-            self.CTLLightbulbLightness.lightness_target = (
-                self.CTLLightbulbLightness.lightness_current)
-            self.pri_level_target = (
-                self.pri_level_current - 32768)
-            self.pri_level_target = (
-                self.pri_level_current)
+        elif self.pri_level_request_kind == self.lib.btmesh.generic_client.SET_REQUEST_TYPE_REQUEST_LEVEL_HALT:
+            self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_current
+            self.CTLLightbulbLightness.lightness_target = self.CTLLightbulbLightness.lightness_current
+            self.pri_level_target = self.pri_level_current - 32768
+            self.pri_level_target = self.pri_level_current
             self.pri_level_move_stop()
-            self.lighting_set_level(self.CTLLightbulbLightness.lightness_current,
-                                    IMMEDIATE)
+            self.lighting_set_level(self.CTLLightbulbLightness.lightness_current, IMMEDIATE)
             self.pri_level_update_and_publish(0, IMMEDIATE)
 
     def pri_level_update(self, elem_index, remaining_ms):
@@ -566,14 +540,11 @@ class LightnessServer(OnOffServer):
 
     def pri_level_transition_complete(self):
         """Callback to a generic level request on primary element with non-zero transition time."""
-        self.pri_level_current = (
-            self.pri_level_target)
-        self.CTLLightbulbLightness.lightness_current = (
-            self.CTLLightbulbLightness.lightness_target)
+        self.pri_level_current = self.pri_level_target
+        self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
 
         if self.CTLLightbulbLightness.lightness_target != 0:
-            self.CTLLightbulbLightness.lightness_last = (
-                self.CTLLightbulbLightness.lightness_target)
+            self.CTLLightbulbLightness.lightness_last = self.CTLLightbulbLightness.lightness_target
 
         self.log.info("Transition complete. New level is " +
                       f"{self.pri_level_current}")
@@ -589,16 +560,14 @@ class LightnessServer(OnOffServer):
         actual_request = int.from_bytes(actual_request, byteorder='little', signed=True)
         self.CTLLightbulbLightness.pri_level_target = actual_request
 
-        if (self.pri_level_current
-            == self.pri_level_target):
+        if self.pri_level_current == self.pri_level_target:
             self.log.info("Request for current Generic Level state received.")
         else:
             self.log.info(f"Recall lightness to {self.pri_level_target} " +
                           f"with transition {event.transition_time_ms}")
 
             if event.transition_time_ms == IMMEDIATE:
-                self.pri_level_current = (
-                    self.pri_level_target)
+                self.pri_level_current = self.pri_level_target
             else:
                 # Lightbulb current state will be updated when transition is complete
                 threading.Timer(event.transition_time_ms * 0.001,
@@ -629,18 +598,14 @@ class LightnessServer(OnOffServer):
         """ Schedule the next generic level move request on primary element. """
         transition_ms = 0
         if abs(remaining_delta) < abs(self.move_pri_level_delta):
-            transition_ms = (
-                self.LightnessServerTiming.move_pri_level_trans * remaining_delta
-            ) / self.move_pri_level_delta
+            transition_ms = (self.LightnessServerTiming.move_pri_level_trans * remaining_delta) / self.move_pri_level_delta
 
-            self.lighting_set_level(
-                self.CTLLightbulbLightness.lightness_target, transition_ms)
+            self.lighting_set_level(self.CTLLightbulbLightness.lightness_target, transition_ms)
 
         else:
             transition_ms = self.LightnessServerTiming.move_pri_level_trans
             self.lighting_set_level(
-                self.CTLLightbulbLightness.lightness_current
-                + self.move_pri_level_delta,
+                self.CTLLightbulbLightness.lightness_current + self.move_pri_level_delta,
                 self.LightnessServerTiming.move_pri_level_trans,)
 
         self.LightnessServerTiming.level_move_timer = threading.Timer(transition_ms * 0.001,
@@ -655,15 +620,11 @@ class LightnessServer(OnOffServer):
                       f"delta {self.move_pri_level_delta} " +
                       f"in {self.LightnessServerTiming.move_pri_level_trans} ms")
 
-        remaining_delta = (
-            self.pri_level_target
-            - self.pri_level_current)
+        remaining_delta = self.pri_level_target - self.pri_level_current
         if abs(remaining_delta) < abs(self.move_pri_level_delta):
             # end of move level as it reached target state
-            self.pri_level_current = (
-                self.pri_level_target)
-            self.CTLLightbulbLightness.lightness_current = (
-                self.CTLLightbulbLightness.lightness_target)
+            self.pri_level_current = self.pri_level_target
+            self.CTLLightbulbLightness.lightness_current = self.CTLLightbulbLightness.lightness_target
 
         else:
             self.pri_level_current += self.move_pri_level_delta
@@ -673,9 +634,7 @@ class LightnessServer(OnOffServer):
         self.lighting_nvm_save_timer_start()
         self.pri_level_update_and_publish(0, self.LightnessServerTiming.unknown_remaining_time)
 
-        remaining_delta = (
-            self.pri_level_target
-            - self.pri_level_current)
+        remaining_delta = self.pri_level_target - self.pri_level_current
 
         if remaining_delta != 0:
             self.pri_level_move_schedule_next_request(remaining_delta)

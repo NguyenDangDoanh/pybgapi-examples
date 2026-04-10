@@ -6,7 +6,7 @@ user messages, responses and events. Can be used as a starting point for
 creating custom commands or for testing purposes.
 """
 
-# Copyright 2023 Silicon Laboratories Inc. www.silabs.com
+# Copyright 2025 Silicon Laboratories Inc. www.silabs.com
 #
 # SPDX-License-Identifier: Zlib
 #
@@ -40,6 +40,8 @@ from common.util import ArgumentParser, BluetoothApp, get_connector
 DEFAULT_MESSAGE_LENGTH = 180
 DEFAULT_INTERVAL_MS = 20
 
+CURSOR_UP_ERASE_LINE = "\033[F\033[K"
+
 class UserCommandId(enum.IntEnum):
     """ IDs of the user commands """
     PERIODIC_ASYNC = 1
@@ -57,6 +59,8 @@ class App(BluetoothApp):
         self.test_interval = args.interval
         self.test_end = args.end
         self.test_iteration = 0
+        self.integrity_error_count = 0
+        self.dropped_error_count = 0
 
     def bt_evt_system_boot(self, evt):
         """ Bluetooth event callback """
@@ -66,16 +70,16 @@ class App(BluetoothApp):
         if self.echo_mode:
             self.log.info("Start testing with echo commands")
             self.log.info(f"Parameters: Width={self.test_length}, End={self.test_end}")
+            print("")
             # Note that there is no event processing until the end of this iteration.
             for i in range(self.test_end):
-                print(f"\rTest iteration {i} ", end="")
+                print(f"{CURSOR_UP_ERASE_LINE}Test iteration {i}")
                 self.echo(self.test_length)
-            print("")
-            self.log.info("Test passed.")
             self.stop()
         else:
             self.log.info("Start testing with periodic asynchronous events")
             self.log.info(f"Parameters: Width={self.test_length}, Interval={self.test_interval}, End={self.test_end}")
+            print("")
             self.test_iteration = 0
             self.start_periodic_async_test(self.test_interval, self.test_length)
 
@@ -84,30 +88,51 @@ class App(BluetoothApp):
         user_event_id = evt.message[0]
         user_event_data = evt.message[1:]
 
-        if user_event_id == UserCommandId.PERIODIC_ASYNC:
-            print(f"\rTest iteration {self.test_iteration} ", end="")
-
-            if len(evt.message) != self.test_length:
-                raise RuntimeError(f"Unexpected event length. Expected: {self.test_length}. "
-                                   f"Received: {len(evt.message)}.")
-
-            # The expected event payload is derived from the iteration counter.
-            expected_data = bytes([self.test_iteration % 256]) * (self.test_length - 1)
-            if user_event_data != expected_data:
-                raise RuntimeError(f"Unexpected event data. Expected: 0x{expected_data.hex()}. "
-                                   f"Received: 0x{user_event_data.hex()}.")
-
-            self.test_iteration += 1
-            if self.test_iteration >= self.test_end:
-                print("")
-                self.log.info("Test passed.")
-                self.stop_periodic_async_test()
-                self.stop()
-        else:
+        if user_event_id != UserCommandId.PERIODIC_ASYNC:
             # In this example, only one event ID is expected, but any number of event types may be defined.
             self.log.error(f"Unexpected event ID. Expected: {UserCommandId.PERIODIC_ASYNC}. "
                            f"Received: {user_event_id}.")
+            self.integrity_error_count += 1
             return
+
+        print(f"{CURSOR_UP_ERASE_LINE}Test iteration {self.test_iteration}")
+        # The expected event payload is derived from the iteration counter.
+        expected_data = bytes([self.test_iteration % 256]) * (self.test_length - 1)
+        if user_event_data != expected_data:
+            self.log.error("Unexpected event data.")
+            self.log.error(f"Expected: 0x{expected_data.hex()}.")
+            self.log.error(f"Received: 0x{user_event_data.hex()}.")
+
+            # Check error type
+            if len(evt.message) != self.test_length:
+                self.log.error(f"Unexpected event length. Expected: {self.test_length}. "
+                               f"Received: {len(evt.message)}.")
+                self.integrity_error_count += 1
+            else:
+                integrity = all(byte == user_event_data[0] for byte in user_event_data)
+                if not integrity:
+                    self.integrity_error_count += 1
+                    self.log.error("Integrity check failed.")
+                    for index, byte in enumerate(user_event_data):
+                        if byte != self.test_iteration:
+                            self.log.error(f"First unexpected byte: {byte:#x} at index {index}")
+                            break
+                else:
+                    diff = user_event_data[0] - (self.test_iteration % 256)
+                    # If an event is dropped, the diff should be a positive value.
+                    # Negative values are assumed as a result of wrap-around.
+                    # We don't expect duplicated events that would be another explanation for a negative diff.
+                    if diff < 0:
+                        diff += 0x100
+                    self.log.error(f"Dropped event(s): {diff}")
+                    self.dropped_error_count += diff
+                    # Adjust current test iteration accordingly
+                    self.test_iteration += diff
+
+        self.test_iteration += 1
+        if self.test_iteration >= self.test_end:
+            self.stop_periodic_async_test()
+            self.stop()
 
     def get_board_name(self):
         """ Send user command to get the board name as string. """
@@ -139,8 +164,10 @@ class App(BluetoothApp):
         expected_data = command
         _, response = self.lib.bt.user.message_to_target(command)
         if response != expected_data:
-            raise RuntimeError(f"Unexpected response. Expected: 0x{expected_data.hex()}. "
-                               f"Received: 0x{response.hex()}.")
+            self.log.error("Unexpected response.")
+            self.log.error(f"Expected: 0x{expected_data.hex()}.")
+            self.log.error(f"Received: 0x{response.hex()}.")
+            self.integrity_error_count += 1
 
 def check_int(min_value=None, max_value=None):
     """ Helper for checking integer range. """
@@ -197,6 +224,14 @@ def main():
     app = App(connector, args)
     # Running the application blocks execution until it terminates.
     app.run()
+
+    if app.integrity_error_count == app.dropped_error_count == 0:
+        print("Test passed.")
+    else:
+        print("Test failed.")
+        print(f"Integrity error(s): {app.integrity_error_count}")
+        print(f"Dropped event error(s): {app.dropped_error_count}")
+        sys.exit(-1)
 
 # Script entry point.
 if __name__ == "__main__":

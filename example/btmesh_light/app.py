@@ -3,7 +3,7 @@
 BtMesh NCP Light Server Example Application.
 """
 
-# Copyright 2022 Silicon Laboratories Inc. www.silabs.com
+# Copyright 2025 Silicon Laboratories Inc. www.silabs.com
 #
 # SPDX-License-Identifier: Zlib
 #
@@ -195,7 +195,7 @@ class App(CTLServer, FactoryReset):
                                     IMMEDIATE)
         except CommandFailedError as e:
             # Can not find data in nvm with the given key
-            if e.errorcode != status.BT_PS_KEY_NOT_FOUND:
+            if e.errorcode != status.NOT_FOUND:
                 raise
             self.log.warning("Lighting server nvm data was not found")
 
@@ -212,7 +212,7 @@ class App(CTLServer, FactoryReset):
                                     IMMEDIATE)
         except CommandFailedError as e:
             # Can not find data in nvm with the given key
-            if e.errorcode != status.BT_PS_KEY_NOT_FOUND:
+            if e.errorcode != status.NOT_FOUND:
                 raise
             self.log.warning("CTL server nvm data was not found")
 

@@ -333,14 +333,6 @@ NVM3_RESIZE_NOT_ENOUGH_SPACE = Status(0x0066)
 NVM3_ERASE_COUNT_ERROR = Status(0x0067)
 """Erase counts are not valid"""
 NVM3_NVM_ACCESS = Status(0x0068)
-"""A NVM function call was failing"""
-NVM3_CRYPTO_INIT_FAILED = Status(0x0069)
-"""Crypto initialization failed"""
-NVM3_ENCRYPTION_KEY_ERROR = Status(0x006A)
-"""Error in obtaining encryption key"""
-NVM3_RANDOM_NUM_GENERATION_FAILED = Status(0x006B)
-"""Error in obtaining random number"""
-NVM3_ENCRYPTION_FAILED = Status(0x006C)
 """Encryption failed"""
 NVM3_WRITE_TO_NOT_ERASED = Status(0x006D)
 """Write to memory that is not erased"""
@@ -352,10 +344,19 @@ NVM3_SIZE_ERROR = Status(0x0070)
 """Size mismatch error"""
 NVM3_EMULATOR = Status(0x0071)
 """Emulator error"""
-NVM3_SECURITY_INIT_FAILED = Status(0x0072)
-"""Security init failed"""
-NVM3_GET_REGION_LOCATION_FAILED = Status(0x0073)
-"""Get data region location failed"""
+
+# Security status codes
+SECURITY_ENCRYPT_ERROR = Status(0x0072)
+"""Encryption failed"""
+SECURITY_KEY_ERROR = Status(0x0073)
+"""Error in obtaining crypto key"""
+SECURITY_RANDOM_NUM_GEN_ERROR = Status(0x0074)
+"""Error in obtaining random number"""
+SECURITY_AES_CM_RESEED_NEEDED = Status(0x0075)  
+"""AES countermeasure reseed recommended - operation completed but reseed failed or threshold crossed"""
+SECURITY_AES_CM_FAIL = Status(0x0076)  
+"""AES countermeasure security threshold exceeded - countermeasures may be ineffective"""
+
 
 # Bluetooth status codes
 BT_OUT_OF_BONDS = Status(0x0402)
@@ -406,8 +407,14 @@ BT_APPLICATION_ENCRYPTION_DECRYPTION_ERROR = Status(0x041E)
 """Encryption/decryption operation failed."""
 
 # Bluetooth controller status codes
+SL_STATUS_BT_CTRL_UNKNOWN_HCI_COMMAND = Status(0x1001)
+"""Controller has received unrecognized command."""
 BT_CTRL_UNKNOWN_CONNECTION_IDENTIFIER = Status(0x1002)
 """Connection does not exist, or connection open request was cancelled."""
+BT_CTRL_HARDWARE_FAILURE = Status(0x1003)
+"""Controller has failed in a manner that cannot be described with any other error code."""
+BT_CTRL_PAGE_TIMEOUT = Status(0x1004)
+"""Page has timed out out because of the Page Timeout configuration parameter."""
 BT_CTRL_AUTHENTICATION_FAILURE = Status(0x1005)
 """Pairing or authentication failed due to incorrect results in the pairing or authentication procedure. This could be due to an incorrect PIN or Link Key"""
 BT_CTRL_PIN_OR_KEY_MISSING = Status(0x1006)
@@ -448,32 +455,61 @@ BT_CTRL_REPEATED_ATTEMPTS = Status(0x1017)
 """The Controller is disallowing an authentication or pairing procedure because too little time has elapsed since the last authentication or pairing attempt failed."""
 BT_CTRL_PAIRING_NOT_ALLOWED = Status(0x1018)
 """The device does not allow pairing. This can be for example, when a device only allows pairing during a certain time window after some user input allows pairing"""
+BT_CTRL_UNKNOWN_LMP_PDU = Status(0x1019)
+"""he Controller has received an unknown LMP opcode."""
 BT_CTRL_UNSUPPORTED_REMOTE_FEATURE = Status(0x101A)
 """The remote device does not support the feature associated with the issued command."""
+BT_CTRL_SCO_OFFSET_REJECTED = Status(0x101B)     
+"""The offset requested in the LMP_SCO_LINK_REQ PDU has been rejected."""
+BT_CTRL_SCO_INTERVAL_REJECTED = Status(0x101C)     
+"""The interval requested in the LMP_SCO_LINK_REQ PDU has been rejected."""
+BT_CTRL_SCO_AIR_MODE_REJECTED = Status(0x101D)     
+"""The air mode requested in the LMP_SCO_LINK_REQ PDU has been rejected."""
 BT_CTRL_INVALID_LL_PARAMETERS = Status(0x101E)
 """Indicates that some LMP PDU / LL Control PDU parameters were invalid"""
 BT_CTRL_UNSPECIFIED_ERROR = Status(0x101F)
 """No other error code specified is appropriate to use."""
+BT_CTRL_UNSUPPORTED_LL_PARAMETER_VALUE = Status(0x1020)                                             
+"""An LMP PDU or an LL Control PDU contains at least one parameter value that is not supported by the Controller at this time."""
+BT_CTRL_ROLE_CHANGE_NOT_ALLOWED = Status(0x1021)                                                    
+"""Controller will not allow a role change at this time."""
 BT_CTRL_LL_RESPONSE_TIMEOUT = Status(0x1022)
 """Connection terminated due to link-layer procedure timeout."""
 BT_CTRL_LL_PROCEDURE_COLLISION = Status(0x1023)
 """LL procedure has collided with the same transaction or procedure that is already in progress."""
+BT_CTRL_LMP_PDU_NOT_ALLOWED = Status(0x1024)                   
+"""Controller sent an LMP PDU with an opcode that was not allowed."""
+
 BT_CTRL_ENCRYPTION_MODE_NOT_ACCEPTABLE = Status(0x1025)
 """The requested encryption mode is not acceptable at this time."""
 BT_CTRL_LINK_KEY_CANNOT_BE_CHANGED = Status(0x1026)
 """Link key cannot be changed because a fixed unit key is being used."""
+BT_CTRL_REQUESTED_QOS_NOT_SUPPORTED = Status(0x1027) 
+"""The requested Quality of Service is not supported."""
 BT_CTRL_INSTANT_PASSED = Status(0x1028)
 """LMP PDU or LL PDU that includes an instant cannot be performed because the instant when this would have occurred has passed."""
 BT_CTRL_PAIRING_WITH_UNIT_KEY_NOT_SUPPORTED = Status(0x1029)
 """It was not possible to pair as a unit key was requested and it is not supported."""
 BT_CTRL_DIFFERENT_TRANSACTION_COLLISION = Status(0x102A)
 """LMP transaction was started that collides with an ongoing transaction."""
+BT_CTRL_QOS_UNACCEPTABLE_PARAMETER = Status(0x102C)                    
+"""The specified quality of service parameters could not be accepted at this time, but other parameters may be acceptable."""
+BT_CTRL_QOS_REJECTED = Status(0x102D)                                                               
+"""The specified quality of service parameters cannot be accepted and QoS negotiation should be terminated."""
 BT_CTRL_CHANNEL_ASSESSMENT_NOT_SUPPORTED = Status(0x102E)
 """The Controller cannot perform channel assessment because it is not supported."""
 BT_CTRL_INSUFFICIENT_SECURITY = Status(0x102F)
 """The HCI command or LMP PDU sent is only possible on an encrypted link."""
 BT_CTRL_PARAMETER_OUT_OF_MANDATORY_RANGE = Status(0x1030)
 """A parameter value requested is outside the mandatory range of parameters for the given HCI command or LMP PDU."""
+BT_CTRL_ROLE_SWITCH_PENDING = Status(0x1032)     
+"""Role Switch is pending."""
+BT_CTRL_RESERVED_SLOT_VIOLATION = Status(0x1034)     
+"""The current Synchronous negotiation was terminated with the negotiation state set to Reserved Slot Violation."""
+BT_CTRL_ROLE_SWITCH_FAILED = Status(0x1035)     
+"""Role switch was attempted but it failed and the original piconet structure is restored."""
+BT_CTRL_EXTENDED_INQUIRY_RESPONSE_TOO_LARGE = Status(0x1036)     
+"""The extended inquiry response is too large to fit in any of the packet types supported by the Controller."""
 BT_CTRL_SIMPLE_PAIRING_NOT_SUPPORTED_BY_HOST = Status(0x1037)
 """The IO capabilities request or response was rejected because the sending Host does not support Secure Simple Pairing even though the receiving Link Manager does."""
 BT_CTRL_HOST_BUSY_PAIRING = Status(0x1038)
@@ -494,6 +530,8 @@ BT_CTRL_MAC_CONNECTION_FAILED = Status(0x103F)
 """The MAC of the 802.11 AMP was requested to connect to a peer, but the connection failed."""
 BT_CTRL_COARSE_CLOCK_ADJUSTMENT_REJECTED_BUT_WILL_TRY_TO_ADJUST_USING_CLOCK_DRAGGING = Status(0x1040)
 """The master, at this time, is unable to make a coarse adjustment to the piconet clock, using the supplied parameters. Instead the master will attempt to move the clock using clock dragging."""
+BT_CTRL_TYPE0_SUBMAP_NOT_DEFINED = Status(0x1041)     
+"""The LMP PDU is rejected because the Type 0 submap is not currently defined."""
 BT_CTRL_UNKNOWN_ADVERTISING_IDENTIFIER = Status(0x1042)
 """A command was sent from the Host that should identify an Advertising or Sync handle, but the Advertising or Sync handle does not exist."""
 BT_CTRL_LIMIT_REACHED = Status(0x1043)
@@ -532,7 +570,7 @@ BT_ATT_ATT_NOT_FOUND = Status(0x110A)
 """No attribute found within the given attribute handle range."""
 BT_ATT_ATT_NOT_LONG = Status(0x110B)
 """The attribute cannot be read or written using the Read Blob Request"""
-BT_ATT_INSUFFICIENT_ENC_KEY_SIZE = Status(0x110C)
+BT_ATT_ENCRYPTION_KEY_SIZE_TOO_SHORT = Status(0x110C)
 """The Encryption Key Size used for encrypting this link is insufficient."""
 BT_ATT_INVALID_ATT_LENGTH = Status(0x110D)
 """The attribute value length is invalid for the operation"""
@@ -590,6 +628,9 @@ BT_SMP_CROSS_TRANSPORT_KEY_DERIVATION_GENERATION_NOT_ALLOWED = Status(0x120E)
 """Indicates that the BR/EDR Link Key generated on the BR/EDR transport cannot be used to derive and distribute keys for the LE transport."""
 BT_SMP_KEY_REJECTED = Status(0x120F)
 """Indicates that the device chose not to accept a distributed key."""
+BT_SMP_BUSY =Status(0x1210)     
+"""Indicates that the device is not ready to perform a pairing procedure."""
+
 
 # Bluetooth Mesh status codes
 BT_MESH_ALREADY_EXISTS = Status(0x0501)
@@ -802,6 +843,29 @@ ZIGBEE_PRECONFIGURED_KEY_REQUIRED = Status(0x0C1D)
 """An attempt was made to join a Secured Network without a pre-configured key, but the Trust Center sent encrypted data using a pre-configured key."""
 ZIGBEE_EZSP_ERROR = Status(0x0C1E)
 """A Zigbee EZSP error has occured. Track the origin and corresponding EzspStatus for more info."""
+ZIGBEE_ID_DISCOVERY_FAILED = Status(0x0C1F) 
+"""Node ID discovery failed."""
+ZIGBEE_NO_APS_ACK = Status(0x0C20)  
+"""Message was sent but no APS ACK received."""
+ZIGBEE_APS_MESSAGE_CANCELED = Status(0x0C21) 
+"""APS message was canceled."""
+ZIGBEE_ID_DISCOVERY_NOT_ENABLED = Status(0x0C22) 
+"""Node ID discovery not enabled."""
+ZIGBEE_ID_DISCOVERY_UNDERWAY = Status(0x0C23) 
+"""Message was not sent, Node ID discovery is underway."""
+ZIGBEE_SEND_UNICAST_ROUTE_DISCOVERY_UNDERWAY = Status(0x0C24) 
+"""The message was not sent because a route discovery is currently underway. There is no route to the target until the route discovery completes."""
+ZIGBEE_SEND_UNICAST_FAILURE = Status(0x0C25)  
+"""Radius is 0 or message has been dropped because route request failed or failed to submit message to tx queue."""
+ZIGBEE_SEND_UNICAST_NO_ROUTE = Status(0x0C26) 
+"""No active route to the destination."""
+ZIGBEE_BROADCAST_TO_SLEEPY_CHILDREN_TIMEOUT = Status(0x0C27) 
+"""Broadcast message timeout while waiting for sleepy children to poll."""
+ZIGBEE_BROADCAST_RELAY_FAILED = Status(0x0C28) 
+"""Expected a neighbor to relay the message, but none did."""
+ZIGBEE_REJOIN_FAILED_BUT_NETWORK_RESTORED = Status(0x0C29) 
+"""On a router, this indicates that a network rejoin attempt was made and did not succeed, and that the router is resuming operation on its current network. This network status is always followed by a SL_STATUS_NETWORK_UP status."""
+
 
 _doc = {
     # Generic Errors
@@ -936,17 +1000,16 @@ _doc = {
     0x0066: "Not enough NVM to complete resize",
     0x0067: "Erase counts are not valid",
     0x0068: "A NVM function call was failing",
-    0x0069: "Crypto initialization failed",
-    0x006A: "Error in obtaining encryption key",
-    0x006B: "Error in obtaining random number",
-    0x006C: "Encryption failed",
     0x006D: "Write to memory that is not erased",
     0x006E: "Invalid NVM address",
     0x006F: "Key validation failure",
     0x0070: "Size mismatch error",
     0x0071: "Emulator error",
-    0x0072: "Security init failed",
-    0x0073: "Get data region location failed",
+    0x0072: "Encryption failed",
+    0x0073: "Error in obtaining crypto key",
+    0x0074: "Error in obtaining random number",
+    0x0075: "AES countermeasure reseed recommended - operation completed but reseed failed or threshold crossed",
+    0x0076: "AES countermeasure security threshold exceeded - countermeasures may be ineffective",
 
     # Bluetooth status codes
     0x0402: "Bonding procedure can't be started because device has no space left for bond.",
@@ -974,7 +1037,10 @@ _doc = {
     0x041E: "Encryption/decryption operation failed.",
 
     # Bluetooth controller status codes
+    0x1001: "Controller has received unrecognized command.",
     0x1002: "Connection does not exist, or connection open request was cancelled.",
+    0x1003: "Controller has failed in a manner that cannot be described with any other error code.",
+    0x1004: "Page has timed out out because of the Page Timeout configuration parameter.",
     0x1005: "Pairing or authentication failed due to incorrect results in the pairing or authentication procedure. This could be due to an incorrect PIN or Link Key",
     0x1006: "Pairing failed because of missing PIN, or authentication failed because of missing Key",
     0x1007: "Controller is out of memory.",
@@ -995,19 +1061,34 @@ _doc = {
     0x1016: "Local device terminated the connection.",
     0x1017: "The Controller is disallowing an authentication or pairing procedure because too little time has elapsed since the last authentication or pairing attempt failed.",
     0x1018: "The device does not allow pairing. This can be for example, when a device only allows pairing during a certain time window after some user input allows pairing",
+    0x1019: "The Controller has received an unknown LMP opcode.",
     0x101A: "The remote device does not support the feature associated with the issued command.",
+    0x101B: "The offset requested in the LMP_SCO_LINK_REQ PDU has been rejected.",
+    0x101C: "The interval requested in the LMP_SCO_LINK_REQ PDU has been rejected.",
+    0x101D: "The air mode requested in the LMP_SCO_LINK_REQ PDU has been rejected.",
     0x101E: "Indicates that some LMP PDU / LL Control PDU parameters were invalid",
     0x101F: "No other error code specified is appropriate to use.",
+    0x1020: "An LMP PDU or an LL Control PDU contains at least one parameter value that is not supported by the Controller at this time.",
+    0x1021: "Controller will not allow a role change at this time.",
     0x1022: "Connection terminated due to link-layer procedure timeout.",
     0x1023: "LL procedure has collided with the same transaction or procedure that is already in progress.",
+    0x1024: "Controller sent an LMP PDU with an opcode that was not allowed.",
     0x1025: "The requested encryption mode is not acceptable at this time.",
     0x1026: "Link key cannot be changed because a fixed unit key is being used.",
+    0x1027: "The requested Quality of Service is not supported.",
     0x1028: "LMP PDU or LL PDU that includes an instant cannot be performed because the instant when this would have occurred has passed.",
     0x1029: "It was not possible to pair as a unit key was requested and it is not supported.",
     0x102A: "LMP transaction was started that collides with an ongoing transaction.",
+    0x102C: "The specified quality of service parameters could not be accepted at this time, but other parameters may be acceptable.",
+    0x102D: "The specified quality of service parameters cannot be accepted and QoS negotiation should be terminated.",
     0x102E: "The Controller cannot perform channel assessment because it is not supported.",
     0x102F: "The HCI command or LMP PDU sent is only possible on an encrypted link.",
     0x1030: "A parameter value requested is outside the mandatory range of parameters for the given HCI command or LMP PDU.",
+    0x1032: "Role Switch is pending.",
+    0x1034: "The current Synchronous negotiation was terminated with the negotiation state set to Reserved Slot Violation.",
+    0x1035: "Role switch was attempted but it failed and the original piconet structure is restored.",
+    0x1036: "The extended inquiry response is too large to fit in any of the packet types supported by the Controller.",
+
     0x1037: "The IO capabilities request or response was rejected because the sending Host does not support Secure Simple Pairing even though the receiving Link Manager does.",
     0x1038: "The Host is busy with another pairing operation and unable to support the requested pairing. The receiving device should retry pairing again later.",
     0x1039: "The Controller could not calculate an appropriate value for the Channel selection operation.",
@@ -1018,6 +1099,7 @@ _doc = {
     0x103E: "LL initiated a connection but the connection has failed to be established. Controller did not receive any packets from remote end.",
     0x103F: "The MAC of the 802.11 AMP was requested to connect to a peer, but the connection failed.",
     0x1040: "The master, at this time, is unable to make a coarse adjustment to the piconet clock, using the supplied parameters. Instead the master will attempt to move the clock using clock dragging.",
+    0x1041: "The LMP PDU is rejected because the Type 0 submap is not currently defined.",
     0x1042: "A command was sent from the Host that should identify an Advertising or Sync handle, but the Advertising or Sync handle does not exist.",
     0x1043: "Number of operations requested has been reached and has indicated the completion of the activity (e.g., advertising or scanning).",
     0x1044: "A request to the Controller issued by the Host and still pending was successfully canceled.",
@@ -1068,6 +1150,7 @@ _doc = {
     0x120D: "Indicates that the pairing over the LE transport failed due to a Pairing Request sent over the BR/EDR transport in process.",
     0x120E: "Indicates that the BR/EDR Link Key generated on the BR/EDR transport cannot be used to derive and distribute keys for the LE transport.",
     0x120F: "Indicates that the device chose not to accept a distributed key.",
+    0x1210: "Indicates that the device is not ready to perform a pairing procedure.",
 
     # Bluetooth Mesh status codes
     0x0501: "Returned when trying to add a key or some other unique resource with an ID which already exists",
@@ -1178,7 +1261,18 @@ _doc = {
     0x0C1B: "An attempt was made to join a Secured Network, but the device did not receive a Network Key.",
     0x0C1C: "After a device joined a Secured Network, a Link Key was requested (::EMBER_GET_LINK_KEY_WHEN_JOINING) but no response was ever received.",
     0x0C1D: "An attempt was made to join a Secured Network without a pre-configured key, but the Trust Center sent encrypted data using a pre-configured key.",
-    0x0C1E: "A Zigbee EZSP error has occured. Track the origin and corresponding EzspStatus for more info."
+    0x0C1E: "A Zigbee EZSP error has occured. Track the origin and corresponding EzspStatus for more info.",
+    0x0C1F: "Node ID discovery failed.",
+    0x0C20: "Message was sent but no APS ACK received.",
+    0x0C21: "APS message was canceled.",
+    0x0C22: "Node ID discovery not enabled.",
+    0x0C23: "Message was not sent, Node ID discovery is underway.",
+    0x0C24: "The message was not sent because a route discovery is currently underway. There is no route to the target until the route discovery completes.",
+    0x0C25: "Radius is 0 or message has been dropped because route request failed or failed to submit message to tx queue.",
+    0x0C26: "No active route to the destination.",
+    0x0C27: "Broadcast message timeout while waiting for sleepy children to poll.",
+    0x0C28: "Expected a neighbor to relay the message, but none did.",
+    0x0C29: "On a router, this indicates that a network rejoin attempt was made and did not succeed, and that the router is resuming operation on its current network. This network status is always followed by a SL_STATUS_NETWORK_UP status."
 }
 
 if __name__ == "__main__":

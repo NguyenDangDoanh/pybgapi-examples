@@ -4,6 +4,22 @@ The releases in this repo are based on particular [Gecko SDK](https://github.com
 and [Simplicity SDK](https://github.com/SiliconLabs/simplicity_sdk/releases) releases.
 The version numbers here reflect the GSDK/SiSDK version that the release is based on.
 
+## [2025.12.0] - 2026-04-10
+
+### Changed
+- Update BGAPI version to 11.0.1.
+- Keep SL status codes aligned with the SiSDK
+- bt_ncp_test example continues execution and reports the number of errors instead of stopping at the first error
+- Replace build number with commit hash in the boot event log
+
+### Fixed
+- BT Mesh switch & light examples
+
+### Removed
+- Robust connector option
+- Custom handling of `CommandFailedError` exceptions in the main loop of the `GenericApp` class
+- Calling sys.exit at the end of the main loop in the `GenericApp` class
+
 ## [2024.12.0] - 2024-12-19
 
 ### Changed
