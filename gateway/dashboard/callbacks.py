@@ -7,6 +7,8 @@ the page keeps its last good data instead of blanking.
 """
 
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import dash
 import plotly.express as px
@@ -18,6 +20,11 @@ from . import layout as L
 
 GATEWAY_PORT = int(os.environ.get("GATEWAY_PORT", "8050"))
 API_BASE = f"http://127.0.0.1:{GATEWAY_PORT}/api"
+TIMEZONE_NAME = os.environ.get("GATEWAY_TIMEZONE", "Asia/Ho_Chi_Minh")
+try:
+    DISPLAY_TIMEZONE = ZoneInfo(TIMEZONE_NAME)
+except ZoneInfoNotFoundError:
+    DISPLAY_TIMEZONE = ZoneInfo("UTC")
 
 # Chart tokens (light surface). Type colors follow the entity, never its rank:
 # dry/wet are identities (categorical slots), unknown is deliberately muted.
@@ -75,6 +82,8 @@ def register(app: dash.Dash) -> None:
                 "status": d.get("status", "unknown"),
                 "client": d.get("client_id") or "unassigned",
                 "last_seen": _fmt_ts(d.get("last_seen")),
+                "temperature": _fmt_number(d.get("temperature_c"), " °C"),
+                "humidity": _fmt_number(d.get("humidity_percent"), " %"),
             }
             for d in devices
         ]
@@ -268,7 +277,22 @@ def _apply_chrome(fig, title: str) -> None:
 
 
 def _fmt_ts(iso: str | None) -> str:
-    """'2026-07-18T10:15:32Z' -> '07-18 10:15:32' (UTC, kept short for tables)."""
+    """Parse ISO safely and show the configured local timezone."""
     if not iso:
         return "—"
-    return iso[5:19].replace("T", " ")
+    try:
+        parsed = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+        return parsed.astimezone(DISPLAY_TIMEZONE).strftime("%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return str(iso)
+
+
+def _fmt_number(value, suffix: str) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.2f}{suffix}"
+    except (TypeError, ValueError):
+        return "—"

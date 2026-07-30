@@ -83,6 +83,8 @@ def _fleet_section() -> html.Div:
                     {"name": "Device", "id": "device"},
                     {"name": "Status", "id": "status"},
                     {"name": "Client", "id": "client"},
+                    {"name": "Temperature", "id": "temperature"},
+                    {"name": "Humidity", "id": "humidity"},
                     {"name": "Last seen", "id": "last_seen"},
                 ],
                 **_TABLE_KWARGS,

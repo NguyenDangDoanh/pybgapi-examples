@@ -1,59 +1,62 @@
-"""Fleet manager — client ID assignment and online/offline tracking.
-
-Online/offline is driven by BLE connection state reported by the BLE host
-(no heartbeat): a device is online while the gateway holds a connection to it,
-and offline once the connection closes.
-
-See design/gateway_app.md.
-"""
+"""Device assignment and online/offline/last-seen tracking."""
 
 from __future__ import annotations
 
-import datetime
+from datetime import datetime, timezone
+from typing import Any
 
 from .dao import Dao
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
 class Fleet:
-    """Manages device-to-patient assignment and liveness status."""
+    """Manages stable BLE-address device IDs and patient assignment."""
 
     def __init__(self, dao: Dao) -> None:
         self.dao = dao
 
     def assign(self, device_id: str, client_id: str | None) -> None:
-        """Assign a patient client_id to a device, or unassign on discharge.
-
-        client_id=None clears the mapping (patient discharged, device reusable).
-        Stamps assigned_at with the current UTC time.
-        """
-        assigned_at = None
-        if client_id is not None:
-            assigned_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
+        assigned_at = _now_iso() if client_id is not None else None
         self.dao.upsert_device(
-            device_id,
-            client_id=client_id,
-            assigned_at=assigned_at
+            device_id, client_id=client_id, assigned_at=assigned_at
         )
 
-    def on_connect(self, device_id: str) -> None:
-        """Mark a device online and update last_seen.
-
-        Called when the BLE host reports a connection opened.
-        """
-        last_seen = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    def on_connect(
+        self,
+        device_id: str,
+        seen_at: str | None = None,
+        **metadata: Any,
+    ) -> None:
         self.dao.upsert_device(
             device_id,
             status="online",
-            last_seen=last_seen
+            last_seen=seen_at or _now_iso(),
+            **metadata,
         )
 
-    def on_disconnect(self, device_id: str) -> None:
-        """Mark a device offline.
-
-        Called when the BLE host reports a connection closed.
-        """
+    def on_disconnect(
+        self,
+        device_id: str,
+        seen_at: str | None = None,
+        **metadata: Any,
+    ) -> None:
         self.dao.upsert_device(
             device_id,
-            status="offline"
+            status="offline",
+            last_seen=seen_at or _now_iso(),
+            **metadata,
         )
+
+    def touch(
+        self,
+        device_id: str,
+        seen_at: str | None = None,
+        **metadata: Any,
+    ) -> None:
+        """Any valid payload proves the node is online and recently seen."""
+        self.on_connect(device_id, seen_at=seen_at, **metadata)

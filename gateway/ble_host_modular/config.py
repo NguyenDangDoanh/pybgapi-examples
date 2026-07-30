@@ -9,6 +9,7 @@ from pathlib import Path
 from constants import (
     DEFAULT_COUGH_UUID,
     DEFAULT_ENVIRONMENT_UUID,
+    DEFAULT_MAX_CONNECTIONS,
     DEFAULT_NAME_PREFIX,
     DEFAULT_SERVICE_UUID,
 )
@@ -52,6 +53,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--address",
         help="Optional exact xG26 address; overrides --name-prefix.",
+    )
+    parser.add_argument(
+        "--max-connections",
+        type=int,
+        default=DEFAULT_MAX_CONNECTIONS,
+        help=(
+            "Maximum simultaneous xG26 connections when matching by name "
+            "prefix (default: %(default)s). The BGM220 NCP configuration "
+            "must support at least this many links."
+        ),
     )
     parser.add_argument(
         "--service-uuid",
@@ -105,6 +116,12 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit(
             "--scan-window must be less than or equal to --scan-interval."
         )
+
+    if not 1 <= args.max_connections <= 32:
+        raise SystemExit("--max-connections must be between 1 and 32.")
+
+    if args.address is not None and args.max_connections != 1:
+        args.max_connections = 1
 
     if not os.path.isfile(args.xapi):
         raise SystemExit(

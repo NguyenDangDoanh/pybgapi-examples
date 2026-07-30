@@ -1,18 +1,24 @@
-"""SQLite data access layer — the only module that touches SQL.
-
-All other gateway modules take and return plain dicts.  init_db is idempotent
-(CREATE TABLE IF NOT EXISTS).  See design/gateway_app.md.
-"""
+"""Thread-safe SQLite data access and in-place schema migration."""
 
 from __future__ import annotations
 
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 
 class Dao:
-    """Thin wrapper over SQLite for devices and cough_events tables."""
+    """Data access for devices, cough events, and environment readings."""
+
+    _DEVICE_FIELDS = {
+        "name",
+        "address_type",
+        "client_id",
+        "assigned_at",
+        "status",
+        "last_seen",
+    }
 
     def __init__(self, db_path: str = "cough_monitor.db") -> None:
         self.db_path = db_path
@@ -20,182 +26,283 @@ class Dao:
         self._lock = threading.RLock()
 
     def init_db(self, schema_path: str) -> None:
-        """Open the database and run schema.sql.
-
-        Must be safe to call multiple times (idempotent DDL).
-        The connection is shared by the socket and Flask threads, so every
-        database operation is protected by the same re-entrant lock.
-        """
+        """Open SQLite, apply DDL, then migrate databases made by older builds."""
         with self._lock:
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA foreign_keys = ON")
             self.conn.execute("PRAGMA busy_timeout = 5000")
             self.conn.execute("PRAGMA journal_mode = WAL")
-            with open(schema_path, "r", encoding="utf-8") as f:
-                self.conn.executescript(f.read())
+            self.conn.execute("PRAGMA synchronous = NORMAL")
+            with open(schema_path, "r", encoding="utf-8") as schema_file:
+                self.conn.executescript(schema_file.read())
+            self._migrate_existing_database()
             self.conn.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            if self.conn is not None:
+                self.conn.close()
+                self.conn = None
 
     def _get_conn(self) -> sqlite3.Connection:
         if self.conn is None:
             raise RuntimeError("Database is not initialized. Call init_db() first.")
         return self.conn
 
-    def insert_event(self, evt: dict) -> int:
-        """Insert one cough event row."""
+    def _columns(self, table: str) -> set[str]:
+        rows = self._get_conn().execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row[1]) for row in rows}
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        if column not in self._columns(table):
+            self._get_conn().execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {declaration}"
+            )
+
+    def _migrate_existing_database(self) -> None:
+        # CREATE TABLE IF NOT EXISTS does not add columns to an existing table.
+        for column, declaration in {
+            "name": "TEXT",
+            "address_type": "INTEGER",
+        }.items():
+            self._ensure_column("devices", column, declaration)
+
+        for column, declaration in {
+            "message_id": "TEXT",
+            "session_id": "TEXT",
+            "node_event_timestamp": "INTEGER",
+            "timestamp_source": "TEXT",
+            "payload_hex": "TEXT",
+        }.items():
+            self._ensure_column("cough_events", column, declaration)
+
+        # Old rows may contain NULL event_ts. New ingestion always supplies it.
+        self._get_conn().execute(
+            "UPDATE cough_events SET event_ts = received_ts WHERE event_ts IS NULL"
+        )
+        self._get_conn().executescript(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_cough_message_id
+                ON cough_events(message_id) WHERE message_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS ix_cough_received
+                ON cough_events(received_ts DESC);
+            CREATE INDEX IF NOT EXISTS ix_cough_client_received
+                ON cough_events(client_id, received_ts DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_environment_message_id
+                ON environment_readings(message_id) WHERE message_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS ix_environment_device_received
+                ON environment_readings(device_id, received_ts DESC);
+            """
+        )
+
+    @staticmethod
+    def _rows(cursor: sqlite3.Cursor) -> list[dict[str, Any]]:
+        return [dict(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _clamp_limit(limit: int, maximum: int = 500) -> int:
+        try:
+            return min(max(int(limit), 1), maximum)
+        except (TypeError, ValueError):
+            return 50
+
+    def insert_event(self, evt: dict[str, Any]) -> int | None:
+        """Insert a cough event; return None when message_id was already stored."""
         sql = """
-            INSERT INTO cough_events (
-                device_id, client_id, cough_type, event_ts, received_ts, event_counter
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            INSERT OR IGNORE INTO cough_events (
+                message_id, session_id, device_id, client_id, cough_type,
+                event_ts, received_ts, event_counter, node_event_timestamp,
+                timestamp_source, payload_hex
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+        values = (
+            evt.get("message_id"),
+            evt.get("session_id"),
+            evt.get("device_id"),
+            evt.get("client_id"),
+            evt.get("cough_type"),
+            evt.get("event_ts"),
+            evt.get("received_ts"),
+            evt.get("event_counter"),
+            evt.get("node_event_timestamp"),
+            evt.get("timestamp_source"),
+            evt.get("payload_hex"),
+        )
         with self._lock:
-            conn = self._get_conn()
-            cursor = conn.execute(sql, (
-                evt.get("device_id"),
-                evt.get("client_id"),
-                evt.get("cough_type"),
-                evt.get("event_ts"),
-                evt.get("received_ts"),
-                evt.get("event_counter")
-            ))
-            conn.commit()
-            return cursor.lastrowid
+            cursor = self._get_conn().execute(sql, values)
+            self._get_conn().commit()
+            return int(cursor.lastrowid) if cursor.rowcount else None
+
+    def insert_environment(self, reading: dict[str, Any]) -> int | None:
+        sql = """
+            INSERT OR IGNORE INTO environment_readings (
+                message_id, session_id, device_id, client_id, event_ts,
+                received_ts, temperature_c, humidity_percent,
+                temperature_x100, humidity_x100, payload_hex
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """
+        values = (
+            reading.get("message_id"),
+            reading.get("session_id"),
+            reading.get("device_id"),
+            reading.get("client_id"),
+            reading.get("event_ts"),
+            reading.get("received_ts"),
+            reading.get("temperature_c"),
+            reading.get("humidity_percent"),
+            reading.get("temperature_x100"),
+            reading.get("humidity_x100"),
+            reading.get("payload_hex"),
+        )
+        with self._lock:
+            cursor = self._get_conn().execute(sql, values)
+            self._get_conn().commit()
+            return int(cursor.lastrowid) if cursor.rowcount else None
 
     def get_events(
-        self, client_id: str, start_time: str | None = None, end_time: str | None = None
-    ) -> list[dict]:
-        """Return cough events for a client, optionally filtered by time range."""
+        self,
+        client_id: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> list[dict[str, Any]]:
         sql = "SELECT * FROM cough_events WHERE client_id = ?"
         params: list[object] = [client_id]
-
         if start_time is not None:
             sql += " AND received_ts >= ?"
             params.append(start_time)
-
         if end_time is not None:
             sql += " AND received_ts <= ?"
             params.append(end_time)
-
-        sql += " ORDER BY received_ts DESC"
-
+        sql += " ORDER BY received_ts DESC, id DESC"
         with self._lock:
-            cursor = self._get_conn().execute(sql, params)
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return self._rows(self._get_conn().execute(sql, params))
 
-    def get_recent_events(self, limit: int = 100) -> list[dict]:
-        """Return the latest events across the fleet (newest first)."""
-        sql = "SELECT * FROM cough_events ORDER BY received_ts DESC LIMIT ?"
+    def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        limit = self._clamp_limit(limit)
         with self._lock:
-            cursor = self._get_conn().execute(sql, (limit,))
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return self._rows(
+                self._get_conn().execute(
+                    "SELECT * FROM cough_events ORDER BY received_ts DESC, id DESC LIMIT ?",
+                    (limit,),
+                )
+            )
 
-    def get_device(self, device_id: str) -> dict | None:
-        """Look up a device record, or None if it has never been seen."""
-        sql = "SELECT * FROM devices WHERE device_id = ?"
+    def get_recent_environment(self, limit: int = 100) -> list[dict[str, Any]]:
+        limit = self._clamp_limit(limit)
         with self._lock:
-            cursor = self._get_conn().execute(sql, (device_id,))
-            row = cursor.fetchone()
-            if row:
-                columns = [col[0] for col in cursor.description]
-                return dict(zip(columns, row))
-            return None
+            return self._rows(
+                self._get_conn().execute(
+                    "SELECT * FROM environment_readings ORDER BY received_ts DESC, id DESC LIMIT ?",
+                    (limit,),
+                )
+            )
 
-    def upsert_device(self, device_id: str, **kwargs) -> None:
-        """Insert a device row if needed and update any provided fields."""
-        sql_insert = """
-            INSERT INTO devices (device_id, status)
-            VALUES (?, 'offline')
-            ON CONFLICT(device_id) DO NOTHING
-        """
+    def get_device(self, device_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT * FROM devices WHERE device_id = ?", (device_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def upsert_device(self, device_id: str, **kwargs: Any) -> None:
+        """Insert a device and update only explicitly whitelisted columns."""
+        updates = {key: value for key, value in kwargs.items() if key in self._DEVICE_FIELDS}
+        unknown = set(kwargs) - self._DEVICE_FIELDS
+        if unknown:
+            raise ValueError(f"Unsupported device field(s): {', '.join(sorted(unknown))}")
 
         with self._lock:
             conn = self._get_conn()
-            conn.execute(sql_insert, (device_id,))
-
-            if kwargs:
-                set_clause = ", ".join([f"{key} = ?" for key in kwargs.keys()])
-                values = list(kwargs.values()) + [device_id]
-                sql_update = f"UPDATE devices SET {set_clause} WHERE device_id = ?"
-                conn.execute(sql_update, values)
-
+            conn.execute(
+                "INSERT INTO devices (device_id, status) VALUES (?, 'offline') "
+                "ON CONFLICT(device_id) DO NOTHING",
+                (device_id,),
+            )
+            if updates:
+                clause = ", ".join(f"{key} = ?" for key in updates)
+                conn.execute(
+                    f"UPDATE devices SET {clause} WHERE device_id = ?",
+                    (*updates.values(), device_id),
+                )
             conn.commit()
 
     def set_client(self, device_id: str, client_id: str | None) -> None:
-        """Assign or clear the patient/client mapping on a device."""
-        sql = "UPDATE devices SET client_id = ? WHERE device_id = ?"
         with self._lock:
-            conn = self._get_conn()
-            conn.execute(sql, (client_id, device_id))
-            conn.commit()
+            self._get_conn().execute(
+                "UPDATE devices SET client_id = ? WHERE device_id = ?",
+                (client_id, device_id),
+            )
+            self._get_conn().commit()
 
     def set_status(self, device_id: str, status: str, last_seen: str) -> None:
-        """Update online/offline status and the last_seen timestamp."""
-        sql = "UPDATE devices SET status = ?, last_seen = ? WHERE device_id = ?"
         with self._lock:
-            conn = self._get_conn()
-            conn.execute(sql, (status, last_seen, device_id))
-            conn.commit()
+            self._get_conn().execute(
+                "UPDATE devices SET status = ?, last_seen = ? WHERE device_id = ?",
+                (status, last_seen, device_id),
+            )
+            self._get_conn().commit()
 
-    def get_devices(self) -> list[dict]:
-        """Return all devices with status, client_id, and last_seen."""
-        sql = "SELECT * FROM devices ORDER BY device_id"
+    def mark_all_offline(self) -> None:
+        """Clear stale online flags after a gateway process restart/crash."""
         with self._lock:
-            cursor = self._get_conn().execute(sql)
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            self._get_conn().execute("UPDATE devices SET status = 'offline'")
+            self._get_conn().commit()
 
-    def list_clients(self) -> list[dict]:
-        """Return distinct clients with summary stats."""
+    def get_devices(self) -> list[dict[str, Any]]:
         sql = """
-            SELECT
-                client_id,
-                COUNT(*) as total_events,
-                MAX(received_ts) as last_event
-            FROM cough_events
-            WHERE client_id IS NOT NULL
-            GROUP BY client_id
+            SELECT d.*,
+                (SELECT e.temperature_c FROM environment_readings e
+                 WHERE e.device_id = d.device_id
+                 ORDER BY e.received_ts DESC, e.id DESC LIMIT 1) AS temperature_c,
+                (SELECT e.humidity_percent FROM environment_readings e
+                 WHERE e.device_id = d.device_id
+                 ORDER BY e.received_ts DESC, e.id DESC LIMIT 1) AS humidity_percent,
+                (SELECT e.event_ts FROM environment_readings e
+                 WHERE e.device_id = d.device_id
+                 ORDER BY e.received_ts DESC, e.id DESC LIMIT 1) AS environment_ts
+            FROM devices d
+            ORDER BY d.device_id
         """
         with self._lock:
-            cursor = self._get_conn().execute(sql)
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return self._rows(self._get_conn().execute(sql))
 
-    def get_client_summaries(self) -> list[dict]:
+    def list_clients(self) -> list[dict[str, Any]]:
+        sql = """
+            SELECT client_id, COUNT(*) AS total_events, MAX(received_ts) AS last_event
+            FROM cough_events
+            WHERE client_id IS NOT NULL AND client_id != 'unknown'
+            GROUP BY client_id
+            ORDER BY client_id
+        """
+        with self._lock:
+            return self._rows(self._get_conn().execute(sql))
+
+    def get_client_summaries(self) -> list[dict[str, Any]]:
         return self.list_clients()
 
-    def get_hourly_counts(self, client_id: str) -> list[dict]:
-        """Count coughs by hour over the latest 24 hours for one client."""
+    def get_hourly_counts(self, client_id: str) -> list[dict[str, Any]]:
         start_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         sql = """
-            SELECT
-                strftime('%Y-%m-%d %H:00:00', received_ts) as time_bucket,
-                cough_type,
-                COUNT(*) as count
+            SELECT strftime('%Y-%m-%d %H:00:00', received_ts) AS time_bucket,
+                   cough_type, COUNT(*) AS count
             FROM cough_events
             WHERE client_id = ? AND received_ts >= ?
             GROUP BY time_bucket, cough_type
             ORDER BY time_bucket ASC
         """
         with self._lock:
-            cursor = self._get_conn().execute(sql, (client_id, start_time))
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return self._rows(self._get_conn().execute(sql, (client_id, start_time)))
 
-    def get_daily_counts(self, client_id: str) -> list[dict]:
-        """Count coughs by day over the latest 7 days for one client."""
+    def get_daily_counts(self, client_id: str) -> list[dict[str, Any]]:
         start_time = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         sql = """
-            SELECT
-                strftime('%Y-%m-%d', received_ts) as time_bucket,
-                cough_type,
-                COUNT(*) as count
+            SELECT strftime('%Y-%m-%d', received_ts) AS time_bucket,
+                   cough_type, COUNT(*) AS count
             FROM cough_events
             WHERE client_id = ? AND received_ts >= ?
             GROUP BY time_bucket, cough_type
             ORDER BY time_bucket ASC
         """
         with self._lock:
-            cursor = self._get_conn().execute(sql, (client_id, start_time))
-            columns = [col[0] for col in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return self._rows(self._get_conn().execute(sql, (client_id, start_time)))
