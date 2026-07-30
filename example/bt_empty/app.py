@@ -32,7 +32,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "../.."))
 from common.util import ArgumentParser, BluetoothApp, get_connector
 
 # Characteristic values
-GATTDB_DEVICE_NAME = b"Empty Example"
+GATTDB_DEVICE_NAME = b"BreathSense NCP"
 GATTDB_MANUFACTURER_NAME_STRING = b"Silicon Labs"
 
 class App(BluetoothApp):

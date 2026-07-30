@@ -1,3 +1,59 @@
 *.pyc
 bonding_db.json
 graph.svg
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache and build files
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environment variables and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.token
+*credentials*
+*secret*
+
+# Local databases and runtime files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Backup and compressed files
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# Editor temporary files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Local backup copies
+*.bak
+*.bak_*
+
+# Duplicated handoff package kept only on Raspberry Pi
+Pi_BGM220_handoff/
