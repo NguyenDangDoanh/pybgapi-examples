@@ -42,9 +42,42 @@ def rule_rate_doubled(client_id: str, analytics: Analytics) -> Suggestion | None
     return None
 
 
+
+def rule_ewma_baseline(
+    client_id: str,
+    analytics: Analytics,
+) -> Suggestion | None:
+    """Fire when today's cough count exceeds the EWMA baseline threshold."""
+    status = analytics.ewma_baseline_status(
+        client_id=client_id,
+        alpha=0.2,
+        threshold_pct=0.4,
+        min_buffer=5.0,
+        history_days=30,
+    )
+
+    # Chưa có ít nhất một ngày lịch sử hoàn chỉnh để tạo baseline.
+    if not status["available"]:
+        return None
+
+    if status["abnormal"]:
+        return Suggestion(
+            rule="cough_above_ewma_baseline",
+            text=(
+                f"Số lần ho hôm nay là {status['today_count']}, "
+                f"vượt ngưỡng động {status['max_allowed']:.1f}. "
+                f"Mức nền EWMA hiện tại là "
+                f"{status['baseline']:.1f} lần/ngày."
+            ),
+        )
+
+    return None
+
+
 # Append new rule functions here — evaluate() runs all of them.
 RULES = [
     rule_rate_doubled,
+    rule_ewma_baseline,
 ]
 
 

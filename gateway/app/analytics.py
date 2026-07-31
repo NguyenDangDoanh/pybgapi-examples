@@ -94,6 +94,135 @@ class Analytics:
         )
         return len(events) / window_h
 
+
+    def daily_cough_counts(
+        self,
+        client_id: str,
+        days: int = 30,
+    ) -> list[dict]:
+        """Return observed cough counts grouped by local calendar day.
+
+        Only days containing at least one stored cough event are returned.
+        A missing day is not automatically treated as zero because the
+        gateway may have been offline or the patient may not have been
+        monitored during that day.
+        """
+        if days <= 0:
+            return []
+
+        now = datetime.now(timezone.utc)
+        events = self.dao.get_events(
+            client_id=client_id,
+            # Lấy dư một ngày để tránh cắt mất phần đầu của ngày biên.
+            start_time=(now - timedelta(days=days + 1)).isoformat(),
+            end_time=now.isoformat(),
+        )
+
+        daily_map: defaultdict[str, int] = defaultdict(int)
+
+        for event in events:
+            ts = _parse_ts(
+                event.get("event_ts") or event.get("received_ts")
+            )
+            if ts is not None:
+                daily_map[ts.strftime("%Y-%m-%d")] += 1
+
+        return [
+            {"date": key, "count": value}
+            for key, value in sorted(daily_map.items())
+        ]
+
+    def ewma_baseline_status(
+        self,
+        client_id: str,
+        alpha: float = 0.2,
+        threshold_pct: float = 0.4,
+        min_buffer: float = 5.0,
+        history_days: int = 30,
+    ) -> dict:
+        """Compare today's cough count with an EWMA baseline.
+
+        The first completed observed day initializes the baseline.
+        Abnormal historical days are evaluated but are not allowed to
+        increase the baseline.
+        """
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError("alpha must be in the range (0, 1]")
+
+        if threshold_pct < 0.0:
+            raise ValueError("threshold_pct must be non-negative")
+
+        if min_buffer < 0.0:
+            raise ValueError("min_buffer must be non-negative")
+
+        daily_counts = self.daily_cough_counts(
+            client_id=client_id,
+            days=history_days,
+        )
+
+        today = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
+
+        today_count = 0
+        completed_days: list[dict] = []
+
+        for item in daily_counts:
+            if item["date"] == today:
+                today_count = int(item["count"])
+            elif item["date"] < today:
+                completed_days.append(item)
+
+        if not completed_days:
+            return {
+                "available": False,
+                "client_id": client_id,
+                "today": today,
+                "today_count": today_count,
+                "baseline": None,
+                "max_allowed": None,
+                "abnormal": False,
+                "observed_history_days": 0,
+                "reason": "no_completed_history",
+            }
+
+        baseline = float(completed_days[0]["count"])
+
+        for item in completed_days[1:]:
+            count = int(item["count"])
+            allowed_increase = max(
+                baseline * threshold_pct,
+                min_buffer,
+            )
+            max_allowed = baseline + allowed_increase
+            historical_abnormal = count > max_allowed
+
+            # Không để ngày bất thường kéo mức nền tăng lên.
+            if not historical_abnormal:
+                baseline = (
+                    alpha * count
+                    + (1.0 - alpha) * baseline
+                )
+
+        allowed_increase = max(
+            baseline * threshold_pct,
+            min_buffer,
+        )
+        max_allowed = baseline + allowed_increase
+        abnormal = today_count > max_allowed
+
+        return {
+            "available": True,
+            "client_id": client_id,
+            "today": today,
+            "today_count": today_count,
+            "baseline": round(baseline, 2),
+            "max_allowed": round(max_allowed, 2),
+            "abnormal": abnormal,
+            "observed_history_days": len(completed_days),
+            "alpha": alpha,
+            "threshold_pct": threshold_pct,
+            "min_buffer": min_buffer,
+        }
+
     def rate_previous(self, client_id: str, window_h: int = 24) -> float:
         if window_h <= 0:
             return 0.0
