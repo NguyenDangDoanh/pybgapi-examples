@@ -109,7 +109,12 @@ class BleCentral:
 
                 self._check_timeouts(now)
 
-                if self._has_connection_capacity() and not self.connecting and not self.scanning:
+                if (
+                    self.booted
+                    and self._has_connection_capacity()
+                    and not self.connecting
+                    and not self.scanning
+                ):
                     if now >= self.scan_retry_after:
                         self.start_scan()
 
