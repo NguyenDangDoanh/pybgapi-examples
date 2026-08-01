@@ -16,6 +16,7 @@ COUNT_CHART_ID = "count-chart"
 TYPE_PIE_ID = "type-pie"
 CLIENT_EVENTS_TABLE_ID = "client-events-table"
 SUGGESTIONS_LIST_ID = "suggestions-list"
+BASELINE_ALERTS_ID = "baseline-alerts"
 
 POLL_INTERVAL_MS = 4000
 
@@ -64,6 +65,7 @@ def make_layout() -> html.Div:
             dcc.Interval(id=POLL_INTERVAL_ID, interval=POLL_INTERVAL_MS),
             _fleet_section(),
             _client_section(),
+            _baseline_alerts_section(),
             html.Div(
                 className="row",
                 children=[_live_feed_section(), _suggestions_section()],
@@ -143,6 +145,40 @@ def _client_section() -> html.Div:
                 ],
                 page_size=8,
                 **_TABLE_KWARGS,
+            ),
+        ],
+    )
+
+
+def _baseline_alerts_section() -> html.Div:
+    """Dedicated display for EWMA baseline alerts."""
+    return html.Div(
+        className="card baseline-alert-card",
+        children=[
+            html.Div(
+                className="alert-heading-row",
+                children=[
+                    html.H2("Baseline alerts"),
+                    html.Span(
+                        "EWMA",
+                        className="alert-heading-badge",
+                    ),
+                ],
+            ),
+            html.Div(
+                id=BASELINE_ALERTS_ID,
+                className="baseline-alerts",
+                children=[
+                    html.P(
+                        "Select a client to evaluate the cough baseline.",
+                        className="baseline-alert-empty",
+                    )
+                ],
+            ),
+            html.P(
+                "Alerts indicate deviation from the person's observed "
+                "cough baseline and are not a medical diagnosis.",
+                className="disclaimer",
             ),
         ],
     )

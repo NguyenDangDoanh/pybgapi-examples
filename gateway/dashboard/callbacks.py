@@ -143,6 +143,72 @@ def register(app: dash.Dash) -> None:
         )
 
     @app.callback(
+        Output(L.BASELINE_ALERTS_ID, "children"),
+        Input(L.POLL_INTERVAL_ID, "n_intervals"),
+        Input(L.CLIENT_DROPDOWN_ID, "value"),
+    )
+    def update_baseline_alerts(_n, client_id):
+        """Show only EWMA baseline alerts without changing suggestions."""
+        if not client_id:
+            if dash.ctx.triggered_id == L.POLL_INTERVAL_ID:
+                return dash.no_update
+
+            return html.P(
+                "Select a client to evaluate the cough baseline.",
+                className="baseline-alert-empty",
+            )
+
+        stats = api_get(f"/clients/{client_id}/stats")
+        if stats is None:
+            return dash.no_update
+
+        baseline_alerts = [
+            item
+            for item in stats.get("suggestions", [])
+            if item.get("rule") == "cough_above_ewma_baseline"
+        ]
+
+        if not baseline_alerts:
+            return html.Div(
+                className="baseline-alert-ok",
+                children=[
+                    html.Span("Stable", className="baseline-alert-ok-badge"),
+                    html.Span(
+                        "No EWMA baseline alert is currently active."
+                    ),
+                ],
+            )
+
+        return [
+            html.Div(
+                className="baseline-alert-active",
+                children=[
+                    html.Div(
+                        className="baseline-alert-title",
+                        children=[
+                            html.Span(
+                                "Alert",
+                                className="baseline-alert-badge",
+                            ),
+                            html.Strong(
+                                "Cough level above personal baseline"
+                            ),
+                        ],
+                    ),
+                    html.P(
+                        item.get("text", "Baseline threshold exceeded."),
+                        className="baseline-alert-message",
+                    ),
+                    html.P(
+                        f"Client: {client_id}",
+                        className="baseline-alert-client",
+                    ),
+                ],
+            )
+            for item in baseline_alerts
+        ]
+
+    @app.callback(
         Output(L.SUGGESTIONS_LIST_ID, "children"),
         Input(L.POLL_INTERVAL_ID, "n_intervals"),
         Input(L.CLIENT_DROPDOWN_ID, "value"),

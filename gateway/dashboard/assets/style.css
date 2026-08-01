@@ -153,3 +153,103 @@ body {
     font-size: 11.5px;
     color: #898781;
 }
+
+/* Dedicated EWMA baseline alert card. Existing dashboard styles unchanged. */
+.baseline-alert-card {
+    border-left: 4px solid #c3c2b7;
+}
+
+.alert-heading-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.alert-heading-row h2 {
+    margin: 0;
+}
+
+.alert-heading-badge {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #52514e;
+    background: #e1e0d9;
+    border-radius: 999px;
+    padding: 3px 8px;
+}
+
+.baseline-alerts {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.baseline-alert-empty {
+    margin: 0;
+    color: #898781;
+    font-size: 13px;
+}
+
+.baseline-alert-active {
+    padding: 14px 16px;
+    background: #fff4f2;
+    border: 1px solid #e7aaa2;
+    border-radius: 8px;
+}
+
+.baseline-alert-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.baseline-alert-badge {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #8e1f16;
+    background: #f6d4cf;
+    border-radius: 999px;
+    padding: 3px 8px;
+}
+
+.baseline-alert-message {
+    margin: 9px 0 0;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #441512;
+}
+
+.baseline-alert-client {
+    margin: 7px 0 0;
+    font-size: 11.5px;
+    color: #8e514b;
+}
+
+.baseline-alert-ok {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    background: #f2faf6;
+    border: 1px solid #a9d7bd;
+    border-radius: 8px;
+    font-size: 13px;
+}
+
+.baseline-alert-ok-badge {
+    flex-shrink: 0;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #17633d;
+    background: #d5eedf;
+    border-radius: 999px;
+    padding: 3px 8px;
+}
