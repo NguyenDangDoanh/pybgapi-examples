@@ -57,3 +57,6 @@ Thumbs.db
 
 # Duplicated handoff package kept only on Raspberry Pi
 Pi_BGM220_handoff/
+
+# Local backup files
+*.backup*
