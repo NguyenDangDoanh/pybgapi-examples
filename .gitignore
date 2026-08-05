@@ -60,3 +60,6 @@ Pi_BGM220_handoff/
 
 # Local backup files
 *.backup*
+
+# Local backup files
+*.backup*
