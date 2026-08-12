@@ -102,6 +102,7 @@ def register(app: dash.Dash) -> None:
                 "device": e["device_id"],
                 "client": e.get("client_id") or "unassigned",
                 "type": e.get("cough_type", "unknown"),
+                "bout": _bout_label(e),
             }
             for e in events
         ]
@@ -137,6 +138,7 @@ def register(app: dash.Dash) -> None:
                     "time": _fmt_ts(e.get("event_ts") or e.get("received_ts")),
                     "device": e["device_id"],
                     "type": e.get("cough_type", "unknown"),
+                    "bout": _bout_label(e),
                 }
                 for e in events
             ],
@@ -362,3 +364,14 @@ def _fmt_number(value, suffix: str) -> str:
         return f"{float(value):.2f}{suffix}"
     except (TypeError, ValueError):
         return "—"
+
+
+def _bout_label(event: dict) -> str:
+    """Return monitoring-only bout text without making a diagnosis."""
+    duration = event.get("duration_s")
+    duration_text = (
+        f"{int(duration)} s" if duration is not None else "duration unknown"
+    )
+    if event.get("prolonged"):
+        return f"Prolonged · {duration_text} · requires observation"
+    return duration_text

@@ -73,6 +73,11 @@ class Dao:
             "session_id": "TEXT",
             "node_event_timestamp": "INTEGER",
             "timestamp_source": "TEXT",
+            "flags": "INTEGER",
+            "timestamp_valid": "INTEGER",
+            "stage2_valid": "INTEGER",
+            "prolonged": "INTEGER",
+            "duration_s": "INTEGER",
             "payload_hex": "TEXT",
         }.items():
             self._ensure_column("cough_events", column, declaration)
@@ -113,8 +118,9 @@ class Dao:
             INSERT OR IGNORE INTO cough_events (
                 message_id, session_id, device_id, client_id, cough_type,
                 event_ts, received_ts, event_counter, node_event_timestamp,
-                timestamp_source, payload_hex
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timestamp_source, flags, timestamp_valid, stage2_valid,
+                prolonged, duration_s, payload_hex
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         values = (
             evt.get("message_id"),
@@ -127,6 +133,11 @@ class Dao:
             evt.get("event_counter"),
             evt.get("node_event_timestamp"),
             evt.get("timestamp_source"),
+            evt.get("flags"),
+            evt.get("timestamp_valid"),
+            evt.get("stage2_valid"),
+            evt.get("prolonged"),
+            evt.get("duration_s"),
             evt.get("payload_hex"),
         )
         with self._lock:

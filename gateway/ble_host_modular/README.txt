@@ -26,6 +26,10 @@ Important:
 - device.address is the stable device_id; connection handles are temporary.
 - The 8-byte Cough Event payload remains <BBIH>. event_ts > 0 uses node Unix
   time; event_ts == 0 falls back to Pi receive time for legacy firmware.
+- Cough flags decode timestamp_valid (bit 0), stage2_valid (bit 1), prolonged
+  (bit 2), and estimated duration_s (bits 3-7, maximum 31 seconds).
+- UNKNOWN remains a valid event. A prolonged bout is a monitoring indication
+  requiring observation, not a medical diagnosis.
 - The optional writable Time characteristic receives little-endian uint32 Unix
   time after notifications are enabled and again at each UTC midnight. Its
   absence is supported for backward compatibility.

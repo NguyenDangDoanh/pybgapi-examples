@@ -103,6 +103,33 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(10, row["event_counter"])
         self.assertEqual("node_unix_seconds", row["timestamp_source"])
 
+    def test_cough_bout_metadata_is_persisted(self) -> None:
+        message = self.cough_message("aa:bb:cc:dd:ee:01", "m-bout", 11)
+        message["parsed"].update(
+            {
+                "flags": 0x35,
+                "cough_type": 0,
+                "cough_type_name": "unknown",
+                "event_timestamp": 1785369600,
+                "event_timestamp_iso": "2026-07-30T00:00:00.000Z",
+                "timestamp_source": "node_unix_seconds",
+                "timestamp_valid": True,
+                "stage2_valid": False,
+                "prolonged": True,
+                "duration_s": 6,
+            }
+        )
+
+        self.processor.process(message)
+
+        row = self.dao.get_recent_events(1)[0]
+        self.assertEqual(0x35, row["flags"])
+        self.assertEqual("unknown", row["cough_type"])
+        self.assertEqual(1, row["timestamp_valid"])
+        self.assertEqual(0, row["stage2_valid"])
+        self.assertEqual(1, row["prolonged"])
+        self.assertEqual(6, row["duration_s"])
+
     def test_counter_reset_does_not_report_uint16_sized_gap(self) -> None:
         self.processor.process(self.cough_message("aa:bb:cc:dd:ee:01", "m-10", 100))
         self.processor.process(self.cough_message("aa:bb:cc:dd:ee:01", "m-11", 1))
@@ -224,6 +251,11 @@ class MigrationTest(unittest.TestCase):
                 }
                 self.assertIn("message_id", columns)
                 self.assertIn("timestamp_source", columns)
+                self.assertIn("flags", columns)
+                self.assertIn("timestamp_valid", columns)
+                self.assertIn("stage2_valid", columns)
+                self.assertIn("prolonged", columns)
+                self.assertIn("duration_s", columns)
                 self.assertEqual([], dao.get_recent_environment(10))
             finally:
                 dao.close()
@@ -449,6 +481,29 @@ class BleRoutingTest(unittest.TestCase):
         self.assertEqual(
             ("1970-01-01T00:00:01.000Z", "node_unix_seconds"),
             resolve_event_timestamp(1, "2026-07-30T02:00:00.123Z"),
+        )
+
+    def test_cough_flags_decode_bout_metadata_without_changing_wire_size(self) -> None:
+        from payload_parser import COUGH_EVENT_STRUCT, parse_cough_payload
+
+        payload = struct.pack("<BBIH", 0x35, 0, 1785369600, 2)
+        parsed = parse_cough_payload(payload)
+
+        self.assertEqual(8, COUGH_EVENT_STRUCT.size)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(
+            {
+                "flags": 0x35,
+                "timestamp_valid": True,
+                "stage2_valid": False,
+                "prolonged": True,
+                "duration_s": 6,
+                "cough_type": 0,
+                "cough_type_name": "unknown",
+                "event_timestamp": 1785369600,
+                "event_counter": 2,
+            },
+            parsed,
         )
 
 

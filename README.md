@@ -55,6 +55,11 @@ remains exactly 8 bytes, little-endian `<BBIH>` (`flags`, `cough_type`, Unix
 so the Pi uses `received_ts`; extended firmware sends `event_ts > 0`, which is
 used as the event time.
 
+The same payload also carries cough-bout metadata in `flags`: synchronized
+timestamp, Stage 2 confidence, prolonged status, and an estimated duration up
+to 31 seconds. The gateway stores these fields and presents prolonged bouts as
+monitoring events requiring observation, never as a medical diagnosis.
+
 Extended firmware may add the writable Time characteristic
 `b5e00004-7a4b-4c6d-9e10-112233445566` to the existing BreathSense service.
 After notifications are enabled, the Pi writes a little-endian uint32 Unix

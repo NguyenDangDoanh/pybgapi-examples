@@ -72,13 +72,33 @@ not replace or remove those audit fields.
 | BreathSense service | `b5e00001-7a4b-4c6d-9e10-112233445566` | Primary service |
 | Cough Event | `b5e00002-7a4b-4c6d-9e10-112233445566` | Notify, fixed 8-byte payload |
 | Environment | `b5e00003-7a4b-4c6d-9e10-112233445566` | Notify |
-| Time | `b5e00004-7a4b-4c6d-9e10-112233445566` | Optional Write, uint32 Unix epoch, little-endian |
+| Time | `b5e00004-7a4b-4c6d-9e10-112233445566` | Optional Read + Write, uint32 Unix epoch, little-endian |
 
 The Cough Event payload must remain `struct <BBIH>`:
 
 ```text
 flags:uint8 | cough_type:uint8 | event_ts:uint32 | event_counter:uint16
 ```
+
+The cough-bout firmware assigns the flag bits as follows:
+
+| Bits | Field | Meaning |
+| --- | --- | --- |
+| 0 | `timestamp_valid` | Firmware had a synchronized epoch when the bout event was created |
+| 1 | `stage2_valid` | Stage 2 had enough confidence to classify dry/wet |
+| 2 | `prolonged` | Bout duration reached the configurable prolonged threshold |
+| 3–7 | `duration_s` | Estimated bout duration, saturated at 31 seconds |
+
+`UNKNOWN` is still a valid cough event, including when `prolonged=true`; it
+means Stage 2 did not confidently choose dry or wet. The gateway persists the
+raw flags and all decoded fields. The live and client event tables display the
+estimated duration and label prolonged bouts as `requires observation`. This
+is a monitoring indication, not a diagnosis.
+
+The authoritative backward-compatible timestamp rule remains the raw value:
+`event_ts > 0` uses node Unix time and `event_ts == 0` uses `received_ts`.
+`timestamp_valid` is retained as firmware metadata and does not replace that
+rule. Firmware must not put device uptime in `event_ts`.
 
 There is no second cough payload format and no uint16 `delta_seconds since
 disconnect` representation. Legacy firmware keeps sending the same payload
@@ -92,6 +112,11 @@ Event notifications, enables Environment notifications, and then writes the
 current epoch if the optional Time characteristic is present and writable. A
 missing Time characteristic identifies a compatible legacy node; notifications
 continue normally.
+
+The gateway uses a write-with-response procedure and waits for its GATT
+completion asynchronously. Reading Time back is useful for diagnostics but is
+not required for normal FIFO flushing; the firmware begins flushing only after
+it accepts the write.
 
 On reconnect, extended firmware must wait until notifications are enabled and
 the new epoch has been accepted before flushing its offline FIFO. The Time
@@ -152,8 +177,9 @@ python -m compileall -q gateway tests
 python -m unittest discover -s tests -v
 ```
 
-The tests cover legacy and extended timestamps, two nodes using the same event
-counter, duplicate replay across reconnect, uint16 wrap, environment
-persistence and validation, old-database migration, concurrent socket clients,
-per-connection BLE notification routing, optional Time discovery/write,
-isolated write failure, and fleet-wide UTC-date resynchronization.
+The tests cover legacy and extended timestamps, fixed-size bout-flag decoding
+and persistence, two nodes using the same event counter, duplicate replay
+across reconnect, uint16 wrap, environment persistence and validation,
+old-database migration, concurrent socket clients, per-connection BLE
+notification routing, optional Time discovery/write, isolated write failure,
+and fleet-wide UTC-date resynchronization.
