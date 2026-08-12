@@ -310,12 +310,35 @@ class BleRoutingTest(unittest.TestCase):
                 self.errorcode = errorcode
 
         fake_bgapi = types.ModuleType("bgapi")
+        fake_connector = types.ModuleType("bgapi.connector")
+        fake_connector.ConnectorException = type(
+            "ConnectorException", (Exception,), {}
+        )
         fake_bgapi.bglib = SimpleNamespace(
             CommandFailedError=FakeCommandFailedError,
-            BGLibError=type("BGLibError", (Exception,), {}),
         )
+        fake_bgapi.connector = fake_connector
         sys.modules.setdefault("bgapi", fake_bgapi)
+        sys.modules.setdefault("bgapi.connector", fake_connector)
         sys.path.insert(0, str(ROOT / "gateway" / "ble_host_modular"))
+
+    def test_connector_open_error_is_reported_without_secondary_failure(self) -> None:
+        from bgapi.connector import ConnectorException
+        from ble_central import BleCentral
+
+        class UnavailableNcp:
+            @staticmethod
+            def open() -> None:
+                raise ConnectorException("serial port is unavailable")
+
+        central = BleCentral.__new__(BleCentral)
+        central.lib = UnavailableNcp()
+        central.args = SimpleNamespace(serial_port="/dev/ttyACM0")
+
+        with self.assertRaisesRegex(
+            SystemExit, "Cannot open BGM220 NCP at /dev/ttyACM0"
+        ):
+            central.run()
 
     def test_pending_connection_timeout_unblocks_future_scans(self) -> None:
         from ble_central import BleCentral

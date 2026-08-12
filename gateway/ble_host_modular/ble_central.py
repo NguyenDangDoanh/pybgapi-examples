@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import bgapi
+from bgapi.connector import ConnectorException
 
 from advertisement import extract_advertised_name
 from backend_client import JsonLineBackend
@@ -86,7 +87,7 @@ class BleCentral:
     def run(self) -> None:
         try:
             self.lib.open()
-        except (OSError, bgapi.bglib.BGLibError) as exc:
+        except (OSError, ConnectorException) as exc:
             raise SystemExit(
                 f"Cannot open BGM220 NCP at {self.args.serial_port}: {exc}\n"
                 "Check the serial path, dialout membership, and whether "
