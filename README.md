@@ -46,6 +46,26 @@ provides a detailed description how NCP works and how to configure it for CPC an
 
 For the latest BGAPI documentation, see [docs.silabs.com](https://docs.silabs.com/bluetooth/latest/).
 
+## BreathSense gateway time synchronization
+
+The multi-node gateway in [`gateway/ble_host_modular`](gateway/ble_host_modular)
+supports both legacy and time-aware xG26 firmware. The Cough Event wire payload
+remains exactly 8 bytes, little-endian `<BBIH>` (`flags`, `cough_type`, Unix
+`event_ts`, and uint16 `event_counter`). Legacy firmware sends `event_ts = 0`,
+so the Pi uses `received_ts`; extended firmware sends `event_ts > 0`, which is
+used as the event time.
+
+Extended firmware may add the writable Time characteristic
+`b5e00004-7a4b-4c6d-9e10-112233445566` to the existing BreathSense service.
+After notifications are enabled, the Pi writes a little-endian uint32 Unix
+epoch on every connect/reconnect and resynchronizes all connected nodes at each
+UTC midnight. Absence of the Time characteristic is explicitly supported and
+does not interrupt the legacy discovery/notification flow.
+
+See [the gateway timestamp and firmware contract](gateway/README.md#time-synchronization-contract)
+for the UUID table, reconnect ordering, monotonic-clock requirements, offline
+buffer format, and counter semantics.
+
 ## Generic Application Classes
 
 All example applications in this repo are based on the generic application classes. These classes

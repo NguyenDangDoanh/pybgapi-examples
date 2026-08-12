@@ -9,6 +9,7 @@ import threading
 import tempfile
 import types
 import unittest
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,6 +73,9 @@ class PipelineTest(unittest.TestCase):
         )
         self.assertTrue(all(row["event_ts"] for row in rows))
         self.assertTrue(all(row["event_ts"] == row["received_ts"] for row in rows))
+        self.assertTrue(all(row["node_event_timestamp"] == 0 for row in rows))
+        self.assertEqual({7}, {row["event_counter"] for row in rows})
+        self.assertTrue(all(row["timestamp_source"] == "gateway_received" for row in rows))
 
     def test_duplicate_retry_is_not_stored_twice(self) -> None:
         message = self.cough_message("aa:bb:cc:dd:ee:01", "m-retry", 9)
@@ -79,12 +83,32 @@ class PipelineTest(unittest.TestCase):
         self.processor.process(message)
         self.assertEqual(1, len(self.dao.get_recent_events(10)))
 
+    def test_extended_timestamp_keeps_node_and_receive_audit_fields(self) -> None:
+        message = self.cough_message("aa:bb:cc:dd:ee:01", "m-timed", 10)
+        message["event_ts"] = "2026-07-30T00:00:00.000Z"
+        message["parsed"].update(
+            {
+                "event_timestamp": 1785369600,
+                "event_timestamp_iso": "2026-07-30T00:00:00.000Z",
+                "timestamp_source": "node_unix_seconds",
+            }
+        )
+
+        self.processor.process(message)
+
+        row = self.dao.get_recent_events(1)[0]
+        self.assertEqual("2026-07-30T00:00:00.000Z", row["event_ts"])
+        self.assertEqual("2026-07-30T02:00:00.123Z", row["received_ts"])
+        self.assertEqual(1785369600, row["node_event_timestamp"])
+        self.assertEqual(10, row["event_counter"])
+        self.assertEqual("node_unix_seconds", row["timestamp_source"])
+
     def test_counter_reset_does_not_report_uint16_sized_gap(self) -> None:
         self.processor.process(self.cough_message("aa:bb:cc:dd:ee:01", "m-10", 100))
         self.processor.process(self.cough_message("aa:bb:cc:dd:ee:01", "m-11", 1))
         self.assertEqual(2, len(self.dao.get_recent_events(10)))
 
-    def test_reconnect_allows_same_counter_in_new_connection_sequence(self) -> None:
+    def test_reconnect_rejects_duplicate_replay_and_accepts_next_counter(self) -> None:
         device = "aa:bb:cc:dd:ee:01"
         self.processor.process(self.cough_message(device, "m-before-reconnect", 7))
         self.processor.process(
@@ -107,7 +131,14 @@ class PipelineTest(unittest.TestCase):
                 "status": "connected",
             }
         )
-        self.processor.process(self.cough_message(device, "m-after-reconnect", 7))
+        self.processor.process(self.cough_message(device, "m-replayed", 7))
+        self.processor.process(self.cough_message(device, "m-after-reconnect", 8))
+        self.assertEqual(2, len(self.dao.get_recent_events(10)))
+
+    def test_uint16_counter_wrap_is_not_treated_as_reset(self) -> None:
+        device = "aa:bb:cc:dd:ee:01"
+        self.processor.process(self.cough_message(device, "m-65535", 65535))
+        self.processor.process(self.cough_message(device, "m-0", 0))
         self.assertEqual(2, len(self.dao.get_recent_events(10)))
 
     def test_environment_is_stored_and_joined_into_fleet(self) -> None:
@@ -241,9 +272,14 @@ class BleRoutingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         # The CI/container does not need pybgapi to exercise pure routing logic.
+        class FakeCommandFailedError(Exception):
+            def __init__(self, errorcode: int = 1) -> None:
+                super().__init__(errorcode)
+                self.errorcode = errorcode
+
         fake_bgapi = types.ModuleType("bgapi")
         fake_bgapi.bglib = SimpleNamespace(
-            CommandFailedError=type("CommandFailedError", (Exception,), {}),
+            CommandFailedError=FakeCommandFailedError,
             BGLibError=type("BGLibError", (Exception,), {}),
         )
         sys.modules.setdefault("bgapi", fake_bgapi)
@@ -354,6 +390,226 @@ class BleRoutingTest(unittest.TestCase):
         )
         self.assertEqual([11, 12], [message["parsed"]["event_counter"] for message in sent])
         self.assertTrue(all(message["event_ts"] for message in sent))
+
+    def test_cough_payload_keeps_eight_byte_contract_and_uses_node_epoch(self) -> None:
+        from ble_central import BleCentral
+        from models import ConnectionState
+
+        epoch = 1785369600
+        payload = struct.pack("<BBIH", 3, 2, epoch, 65535)
+        sent: list[dict] = []
+        central = BleCentral.__new__(BleCentral)
+        central.connections = {
+            1: ConnectionState(
+                handle=1,
+                address="aa:bb:cc:dd:ee:01",
+                address_type=0,
+                name="MyDevice_01",
+                cough_characteristic=20,
+                cough_characteristic_uuid="cough",
+                phase="running",
+            )
+        }
+        central.session_id = "test-session"
+        central.sequence = 0
+        central.backend = SimpleNamespace(
+            enabled=True,
+            send=lambda message: sent.append(message) or True,
+        )
+        central.lib = SimpleNamespace(gatt=SimpleNamespace())
+
+        central.on_gatt_characteristic_value(
+            SimpleNamespace(
+                connection=1,
+                characteristic=20,
+                att_opcode=0x1B,
+                value=payload,
+            )
+        )
+
+        self.assertEqual(8, len(payload))
+        self.assertEqual(payload.hex(), sent[0]["payload_hex"])
+        self.assertEqual(epoch, sent[0]["parsed"]["event_timestamp"])
+        self.assertEqual(65535, sent[0]["parsed"]["event_counter"])
+        self.assertEqual("node_unix_seconds", sent[0]["parsed"]["timestamp_source"])
+        self.assertEqual("2026-07-30T00:00:00.000Z", sent[0]["event_ts"])
+
+    def test_zero_node_epoch_falls_back_to_received_time(self) -> None:
+        from utils import resolve_event_timestamp
+
+        received = "2026-07-30T02:00:00.123Z"
+        self.assertEqual(
+            (received, "gateway_received"),
+            resolve_event_timestamp(0, received),
+        )
+
+    def test_any_positive_uint32_node_epoch_is_used(self) -> None:
+        from utils import resolve_event_timestamp
+
+        self.assertEqual(
+            ("1970-01-01T00:00:01.000Z", "node_unix_seconds"),
+            resolve_event_timestamp(1, "2026-07-30T02:00:00.123Z"),
+        )
+
+
+class BleTimeSyncTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        BleRoutingTest.setUpClass()
+
+    @staticmethod
+    def _central_with_states(states):
+        from ble_central import BleCentral
+
+        central = BleCentral.__new__(BleCentral)
+        central.connections = {state.handle: state for state in states}
+        central.utc_sync_date = date(2026, 7, 29)
+        central.start_scan = lambda: None
+        central._emit_status = lambda state, status: None
+        return central
+
+    def test_time_characteristic_is_discovered_per_connection(self) -> None:
+        from ble_central import BleCentral
+        from models import ConnectionState
+        from utils import uuid_to_bgapi_bytes
+
+        first = ConnectionState(1, "aa:bb:cc:dd:ee:01", 0, "MyDevice_01")
+        second = ConnectionState(2, "aa:bb:cc:dd:ee:02", 0, "MyDevice_02")
+        central = self._central_with_states([first, second])
+        central.target_cough_uuid = b"cough"
+        central.target_environment_uuid = b"environment"
+        central.target_time_uuid = uuid_to_bgapi_bytes(
+            "b5e00004-7a4b-4c6d-9e10-112233445566"
+        )
+
+        central.on_gatt_characteristic(
+            SimpleNamespace(
+                connection=1,
+                characteristic=22,
+                properties=0x08,
+                uuid=central.target_time_uuid,
+            )
+        )
+
+        self.assertEqual(22, first.time_characteristic)
+        self.assertEqual(0x08, first.time_characteristic_properties)
+        self.assertIsNone(second.time_characteristic)
+
+    def test_connect_enables_legacy_node_without_time_write(self) -> None:
+        from ble_central import BleCentral
+        from models import ConnectionState
+
+        state = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            phase="enable_environment_notifications",
+        )
+        central = self._central_with_states([state])
+        central.lib = SimpleNamespace(bt=SimpleNamespace(gatt=SimpleNamespace()))
+
+        BleCentral.on_gatt_procedure_completed(
+            central, SimpleNamespace(connection=1, result=0)
+        )
+
+        self.assertEqual("running", state.phase)
+        self.assertTrue(state.status_reported)
+        self.assertIsNone(state.last_time_sync_epoch)
+
+    def test_connect_writes_little_endian_uint32_time_after_notifications(self) -> None:
+        from ble_central import BleCentral
+        from models import ConnectionState
+
+        writes: list[tuple[int, int, bytes]] = []
+        state = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            time_characteristic=22,
+            time_characteristic_properties=0x08,
+            phase="enable_environment_notifications",
+        )
+        central = self._central_with_states([state])
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(
+                gatt=SimpleNamespace(
+                    write_characteristic_value=lambda *args: writes.append(args)
+                )
+            )
+        )
+
+        BleCentral.on_gatt_procedure_completed(
+            central, SimpleNamespace(connection=1, result=0)
+        )
+        self.assertEqual("sync_time_connect", state.phase)
+        self.assertEqual(1, len(writes))
+        self.assertEqual((1, 22), writes[0][:2])
+        self.assertEqual(4, len(writes[0][2]))
+        self.assertEqual(state.pending_time_sync_epoch, struct.unpack("<I", writes[0][2])[0])
+
+        BleCentral.on_gatt_procedure_completed(
+            central, SimpleNamespace(connection=1, result=0)
+        )
+        self.assertEqual("running", state.phase)
+        self.assertEqual("connect", state.last_time_sync_reason)
+
+    def test_utc_date_change_resyncs_nodes_once_and_isolates_failure(self) -> None:
+        import bgapi
+        from models import ConnectionState
+
+        failed = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            time_characteristic=22,
+            time_characteristic_properties=0x08,
+            phase="running",
+            status_reported=True,
+        )
+        healthy = ConnectionState(
+            2,
+            "aa:bb:cc:dd:ee:02",
+            0,
+            "MyDevice_02",
+            time_characteristic=22,
+            time_characteristic_properties=0x08,
+            phase="running",
+            status_reported=True,
+        )
+        legacy = ConnectionState(
+            3,
+            "aa:bb:cc:dd:ee:03",
+            0,
+            "MyDevice_03",
+            phase="running",
+            status_reported=True,
+        )
+        writes: list[tuple[int, int, bytes]] = []
+
+        def write(connection, characteristic, value):
+            if connection == 1:
+                raise bgapi.bglib.CommandFailedError(0x0180)
+            writes.append((connection, characteristic, value))
+
+        central = self._central_with_states([failed, healthy, legacy])
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(
+                gatt=SimpleNamespace(write_characteristic_value=write)
+            )
+        )
+        midnight = datetime(2026, 7, 30, 0, 0, tzinfo=timezone.utc)
+
+        central._check_daily_time_sync(midnight)
+        central._check_daily_time_sync(midnight)
+
+        self.assertEqual("running", failed.phase)
+        self.assertIsNone(failed.last_time_sync_epoch)
+        self.assertEqual("sync_time_utc_midnight", healthy.phase)
+        self.assertEqual("running", legacy.phase)
+        self.assertEqual([(2, 22, struct.pack("<I", 1785369600))], writes)
 
 
 if __name__ == "__main__":

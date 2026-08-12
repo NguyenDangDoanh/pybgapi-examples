@@ -35,6 +35,14 @@ class ConnectionState:
     environment_characteristic_uuid: Optional[str] = None
     environment_characteristic_properties: int = 0
 
+    time_characteristic: Optional[int] = None
+    time_characteristic_uuid: Optional[str] = None
+    time_characteristic_properties: int = 0
+    pending_time_sync_epoch: Optional[int] = None
+    pending_time_sync_reason: Optional[str] = None
+    last_time_sync_epoch: Optional[int] = None
+    last_time_sync_reason: Optional[str] = None
+
     phase: str = "discover_service"
     phase_deadline: float = 0.0
     status_reported: bool = False

@@ -159,14 +159,7 @@ class EventProcessor:
             "connected",
             "online",
         )
-        previous = self.dao.get_device(item["device_id"])
-        was_online = bool(previous and previous.get("status") == "online")
         if connected:
-            # A real reconnect starts a fresh counter sequence. Clearing only
-            # on offline -> online avoids duplicate status messages resetting
-            # counter tracking during a healthy connection.
-            if not was_online:
-                self._clear_counter_state(item["device_id"])
             self.fleet.on_connect(
                 item["device_id"], item["received_ts"], **self._metadata(item)
             )
@@ -176,10 +169,6 @@ class EventProcessor:
             )
         if item.get("client_id"):
             self.dao.set_client(item["device_id"], str(item["client_id"]))
-
-    def _clear_counter_state(self, device_id: str) -> None:
-        for key in [key for key in self.last_counter if key[0] == device_id]:
-            self.last_counter.pop(key, None)
 
     def _process_cough(self, item: dict[str, Any]) -> None:
         self.fleet.touch(
