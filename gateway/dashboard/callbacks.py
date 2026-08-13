@@ -59,6 +59,26 @@ def register(app: dash.Dash) -> None:
         return dash.no_update if options == current_options else options
 
     @app.callback(
+        Output(L.FLEET_TABLE_ID, "data"),
+        Input(L.POLL_INTERVAL_ID, "n_intervals"),
+    )
+    def update_device_list(_n):
+        devices = api_get("/devices")
+        if devices is None:
+            return dash.no_update
+        return [
+            {
+                "device": device.get("device_id", "—"),
+                "status": str(device.get("status") or "unknown").title(),
+                "patient": device.get("client_id") or "Unassigned",
+                "temperature": _fmt_number(device.get("temperature_c"), " °C"),
+                "humidity": _fmt_number(device.get("humidity_percent"), " %"),
+                "last_seen": _fmt_ts(device.get("last_seen")),
+            }
+            for device in devices
+        ]
+
+    @app.callback(
         Output(L.COUNT_CHART_ID, "figure"),
         Output(L.TYPE_PIE_ID, "figure"),
         Output(L.DAY_COUNT_ID, "children"),
@@ -264,6 +284,15 @@ def _fmt_ts(value: str | None) -> str:
         return parsed.astimezone(DISPLAY_TIMEZONE).strftime("%m-%d %H:%M:%S")
     except (TypeError, ValueError):
         return str(value)
+
+
+def _fmt_number(value, suffix: str) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.2f}{suffix}"
+    except (TypeError, ValueError):
+        return "—"
 
 
 def _placeholder_figure(message: str) -> go.Figure:

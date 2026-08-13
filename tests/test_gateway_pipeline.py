@@ -20,6 +20,11 @@ from gateway.app.dao import Dao
 from gateway.app.analytics import Analytics
 from gateway.app.event_processor import EventProcessor
 from gateway.app.fleet import Fleet
+from gateway.app.seed_demo_data import (
+    ABOVE_CLIENT,
+    WARMUP_CLIENT,
+    seed_demo_data,
+)
 
 SCHEMA = ROOT / "gateway" / "app" / "schema.sql"
 
@@ -380,6 +385,54 @@ class AnalyticsTest(unittest.TestCase):
         self.assertFalse(own["available"])
         self.assertTrue(other["available"])
         self.assertEqual(1.0, other["baseline"])
+
+
+class DemoDataTest(unittest.TestCase):
+    def test_demo_seed_exercises_dashboard_states_without_duplication(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            dao = Dao(str(Path(tempdir) / "demo.db"))
+            dao.init_db(str(SCHEMA))
+            try:
+                now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+                first = seed_demo_data(dao, now=now)
+                analytics = Analytics(dao)
+                above = analytics.get_client_stats(ABOVE_CLIENT, now=now)
+                warmup = analytics.get_client_stats(WARMUP_CLIENT, now=now)
+
+                self.assertTrue(first["created"])
+                self.assertEqual(111, first["events"])
+                self.assertEqual(22, above["today_count"])
+                self.assertTrue(above["baseline"]["available"])
+                self.assertTrue(above["baseline"]["above_baseline"])
+                self.assertGreater(above["day_night_24h"]["day"], 0)
+                self.assertGreater(above["day_night_24h"]["night"], 0)
+                self.assertTrue(all(above["by_type_24h"].values()))
+                self.assertEqual(4, warmup["today_count"])
+                self.assertFalse(warmup["baseline"]["available"])
+                self.assertEqual(4, warmup["baseline"]["warmup_remaining"])
+
+                devices = {item["name"]: item for item in dao.get_devices()}
+                self.assertEqual("online", devices["Demo Sensor 01"]["status"])
+                self.assertEqual(27.4, devices["Demo Sensor 01"]["temperature_c"])
+                self.assertEqual("offline", devices["Demo Sensor 02"]["status"])
+
+                duplicate = seed_demo_data(dao, now=now)
+                self.assertFalse(duplicate["created"])
+                self.assertEqual(
+                    first["events"],
+                    len(dao.get_events(ABOVE_CLIENT))
+                    + len(dao.get_events(WARMUP_CLIENT)),
+                )
+
+                replaced = seed_demo_data(dao, now=now, replace=True)
+                self.assertTrue(replaced["created"])
+                self.assertEqual(
+                    first["events"],
+                    len(dao.get_events(ABOVE_CLIENT))
+                    + len(dao.get_events(WARMUP_CLIENT)),
+                )
+            finally:
+                dao.close()
 
 
 class SocketConcurrencyTest(unittest.TestCase):

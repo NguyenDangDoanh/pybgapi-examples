@@ -55,6 +55,10 @@ body {
     letter-spacing: 0.035em;
 }
 
+#fleet-table .dash-cell-value {
+    white-space: nowrap;
+}
+
 .patient-card {
     display: flex;
     justify-content: space-between;

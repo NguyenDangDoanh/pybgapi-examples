@@ -5,6 +5,7 @@ from dash import dash_table, dcc, html
 POLL_INTERVAL_ID = "poll-interval"
 CLIENT_DROPDOWN_ID = "client-dropdown"
 RANGE_TOGGLE_ID = "range-toggle"
+FLEET_TABLE_ID = "fleet-table"
 COUNT_CHART_ID = "count-chart"
 TYPE_PIE_ID = "type-pie"
 LIVE_FEED_TABLE_ID = "live-feed-table"
@@ -55,9 +56,32 @@ def make_layout() -> html.Div:
             ),
             dcc.Interval(id=POLL_INTERVAL_ID, interval=POLL_INTERVAL_MS),
             _patient_section(),
+            _fleet_section(),
             _monitoring_section(),
             _baseline_section(),
             _live_feed_section(),
+        ],
+    )
+
+
+def _fleet_section() -> html.Div:
+    return html.Div(
+        className="card",
+        children=[
+            html.H2("Device list"),
+            dash_table.DataTable(
+                id=FLEET_TABLE_ID,
+                columns=[
+                    {"name": "Device", "id": "device"},
+                    {"name": "Status", "id": "status"},
+                    {"name": "Patient", "id": "patient"},
+                    {"name": "Temperature", "id": "temperature"},
+                    {"name": "Humidity", "id": "humidity"},
+                    {"name": "Last seen", "id": "last_seen"},
+                ],
+                page_size=8,
+                **_TABLE_KWARGS,
+            ),
         ],
     )
 
@@ -145,10 +169,6 @@ def _monitoring_section() -> html.Div:
                     ),
                 ],
             ),
-            html.P(
-                "Wet/Dry are AI-based acoustic classifications.",
-                className="disclaimer",
-            ),
         ],
     )
 
@@ -164,10 +184,6 @@ def _baseline_section() -> html.Div:
                     "Select a patient to evaluate the recent personal baseline.",
                     className="empty-state",
                 ),
-            ),
-            html.P(
-                "Project-defined statistical finding. Not a clinical deterioration assessment.",
-                className="disclaimer",
             ),
         ],
     )

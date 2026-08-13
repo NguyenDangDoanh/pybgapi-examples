@@ -170,6 +170,8 @@ transport audit, and debugging.
 
 The doctor dashboard contains:
 
+- a Device list with assignment, connection status, environment values, and
+  last-seen time;
 - the selected patient and last Pi receive time;
 - the observed cough-bout count for the current local calendar day;
 - a 24-hour hourly trend or 7-day daily trend;
@@ -195,6 +197,30 @@ assessment. There is one whole-day baseline; Day and Night do not have
 separate baselines. The current payload does not contain the number of
 individual cough sounds inside a bout, so the gateway does not infer that
 quantity or run a second bout-grouping state machine.
+
+## Optional dashboard demo data
+
+Demo data is never created during normal gateway startup. To exercise every
+dashboard state against the configured SQLite database, run:
+
+```bash
+python -m gateway.app.seed_demo_data --replace
+```
+
+Use `--db /path/to/cough_monitor.db` when `GATEWAY_DB_PATH` is not set and the
+database is elsewhere. The command creates only records whose message IDs use
+the reserved `demo-dashboard-` prefix plus these patients/devices:
+
+- `demo_patient_above_baseline` / `Demo Sensor 01`: seven completed observed
+  days, an above-baseline current day, all cough types, Day/Night bouts,
+  prolonged labels, a delayed-replay example, and environment readings;
+- `demo_patient_warmup` / `Demo Sensor 02`: three completed observed days so
+  the baseline remains in warm-up, plus offline device status and environment
+  readings.
+
+Running without `--replace` leaves existing demo rows untouched. Running with
+`--replace` deletes and rebuilds only rows created by this generator; real
+patient events and environment readings are not modified.
 
 ## Optional environment variables
 
