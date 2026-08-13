@@ -1,10 +1,10 @@
-"""Per-client aggregates and trend queries."""
+"""Per-client cough-bout aggregates and personal statistical baseline."""
 
 from __future__ import annotations
 
 import os
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .dao import Dao
@@ -14,8 +14,12 @@ try:
 except ZoneInfoNotFoundError:
     DISPLAY_TIMEZONE = ZoneInfo("UTC")
 
+DAY_START_HOUR = 6
+NIGHT_START_HOUR = 18
+
 
 def _parse_ts(value: str | None) -> datetime | None:
+    """Parse an ISO timestamp and return it in the configured local timezone."""
     if not value:
         return None
     try:
@@ -23,110 +27,199 @@ def _parse_ts(value: str | None) -> datetime | None:
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(DISPLAY_TIMEZONE)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 
+def _as_utc(value: datetime | None) -> datetime:
+    current = value or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return current.astimezone(timezone.utc)
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _local_midnight_utc(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=DISPLAY_TIMEZONE).astimezone(
+        timezone.utc
+    )
+
+
+def _type_counts(events: list[dict]) -> dict[str, int]:
+    counts = {"wet": 0, "dry": 0, "unknown": 0}
+    for event in events:
+        cough_type = str(event.get("cough_type") or "unknown").lower()
+        counts[cough_type if cough_type in counts else "unknown"] += 1
+    return counts
+
+
+def _day_night_counts(events: list[dict]) -> dict[str, int]:
+    counts = {"day": 0, "night": 0}
+    for event in events:
+        occurred = _parse_ts(event.get("event_ts"))
+        if occurred is None:
+            continue
+        period = (
+            "day"
+            if DAY_START_HOUR <= occurred.hour < NIGHT_START_HOUR
+            else "night"
+        )
+        counts[period] += 1
+    return counts
+
+
 class Analytics:
-    """Computes cough counts, rates, and local-time trends per client."""
+    """Compute occurrence-time bout trends independently for each client."""
 
     def __init__(self, dao: Dao) -> None:
         self.dao = dao
 
-    def get_client_stats(self, client_id: str) -> dict:
-        now = datetime.now(timezone.utc)
-        all_events = self.dao.get_events(client_id=client_id)
-        events_24h = self.dao.get_events(
+    def get_client_stats(
+        self, client_id: str, now: datetime | None = None
+    ) -> dict:
+        now_utc = _as_utc(now)
+        local_now = now_utc.astimezone(DISPLAY_TIMEZONE)
+        start_24h = now_utc - timedelta(hours=24)
+        start_7d = _local_midnight_utc(local_now.date() - timedelta(days=6))
+
+        events_24h = self.dao.get_events_by_occurrence(
             client_id=client_id,
-            start_time=(now - timedelta(hours=24)).isoformat(),
-            end_time=now.isoformat(),
+            start_time=_iso_utc(start_24h),
+            end_time=_iso_utc(now_utc),
         )
-        events_7d = self.dao.get_events(
+        events_7d = self.dao.get_events_by_occurrence(
             client_id=client_id,
-            start_time=(now - timedelta(days=7)).isoformat(),
-            end_time=now.isoformat(),
+            start_time=_iso_utc(start_7d),
+            end_time=_iso_utc(now_utc),
         )
 
-        by_type = {"dry": 0, "wet": 0, "unknown": 0}
         hourly_map: defaultdict[str, int] = defaultdict(int)
-        daily_map: defaultdict[str, int] = defaultdict(int)
-        for event in all_events:
-            cough_type = event.get("cough_type", "unknown")
-            by_type[cough_type if cough_type in by_type else "unknown"] += 1
         for event in events_24h:
-            ts = _parse_ts(event.get("event_ts") or event.get("received_ts"))
-            if ts:
-                hourly_map[ts.strftime("%Y-%m-%dT%H:00:00%z")] += 1
+            occurred = _parse_ts(event.get("event_ts"))
+            if occurred is not None:
+                hourly_map[occurred.strftime("%Y-%m-%dT%H:00:00%z")] += 1
+
+        daily_map: defaultdict[str, int] = defaultdict(int)
         for event in events_7d:
-            ts = _parse_ts(event.get("event_ts") or event.get("received_ts"))
-            if ts:
-                daily_map[ts.strftime("%Y-%m-%d")] += 1
+            occurred = _parse_ts(event.get("event_ts"))
+            if occurred is not None:
+                daily_map[occurred.strftime("%Y-%m-%d")] += 1
+
+        transport_events = self.dao.get_events(client_id=client_id, limit=1)
+        all_events = self.dao.get_events(client_id=client_id)
+        baseline = self.ewma_baseline_status(client_id, now=now_utc)
+
+        by_type_24h = _type_counts(events_24h)
+        by_type_7d = _type_counts(events_7d)
+        day_night_24h = _day_night_counts(events_24h)
+        day_night_7d = _day_night_counts(events_7d)
 
         return {
+            # Legacy keys remain available to existing API consumers. They now
+            # describe the dashboard's default 24-hour occurrence-time range.
             "total": len(all_events),
-            "by_type": by_type,
-            "per_hour": [{"ts": key, "count": value} for key, value in sorted(hourly_map.items())],
-            "per_day": [{"date": key, "count": value} for key, value in sorted(daily_map.items())],
+            "by_type": by_type_24h,
+            "per_hour": [
+                {"ts": key, "count": value}
+                for key, value in sorted(hourly_map.items())
+            ],
+            "per_day": [
+                {"date": key, "count": value}
+                for key, value in sorted(daily_map.items())
+            ],
+            "last_24h_count": len(events_24h),
+            "last_7d_count": len(events_7d),
+            "today_count": baseline["today_count"],
+            "by_type_24h": by_type_24h,
+            "by_type_7d": by_type_7d,
+            "day_night_24h": day_night_24h,
+            "day_night_7d": day_night_7d,
+            "baseline": baseline,
+            "last_received_ts": (
+                transport_events[0].get("received_ts") if transport_events else None
+            ),
         }
 
-    def hourly_counts(self, client_id: str, days: int = 7) -> list[dict]:
-        now = datetime.now(timezone.utc)
-        events = self.dao.get_events(
+    def hourly_counts(
+        self, client_id: str, days: int = 7, now: datetime | None = None
+    ) -> list[dict]:
+        if days <= 0:
+            return []
+        now_utc = _as_utc(now)
+        events = self.dao.get_events_by_occurrence(
             client_id=client_id,
-            start_time=(now - timedelta(days=days)).isoformat(),
-            end_time=now.isoformat(),
+            start_time=_iso_utc(now_utc - timedelta(days=days)),
+            end_time=_iso_utc(now_utc),
         )
         hourly_map: defaultdict[str, int] = defaultdict(int)
         for event in events:
-            ts = _parse_ts(event.get("event_ts") or event.get("received_ts"))
-            if ts:
-                hourly_map[ts.strftime("%Y-%m-%dT%H:00:00%z")] += 1
-        return [{"ts": key, "count": value} for key, value in sorted(hourly_map.items())]
+            occurred = _parse_ts(event.get("event_ts"))
+            if occurred is not None:
+                hourly_map[occurred.strftime("%Y-%m-%dT%H:00:00%z")] += 1
+        return [
+            {"ts": key, "count": value} for key, value in sorted(hourly_map.items())
+        ]
 
-    def rate(self, client_id: str, window_h: int = 24) -> float:
+    def rate(
+        self, client_id: str, window_h: int = 24, now: datetime | None = None
+    ) -> float:
         if window_h <= 0:
             return 0.0
-        now = datetime.now(timezone.utc)
-        events = self.dao.get_events(
+        now_utc = _as_utc(now)
+        events = self.dao.get_events_by_occurrence(
             client_id=client_id,
-            start_time=(now - timedelta(hours=window_h)).isoformat(),
-            end_time=now.isoformat(),
+            start_time=_iso_utc(now_utc - timedelta(hours=window_h)),
+            end_time=_iso_utc(now_utc),
         )
         return len(events) / window_h
 
+    def rate_previous(
+        self, client_id: str, window_h: int = 24, now: datetime | None = None
+    ) -> float:
+        if window_h <= 0:
+            return 0.0
+        now_utc = _as_utc(now)
+        end_time = now_utc - timedelta(hours=window_h)
+        events = self.dao.get_events_by_occurrence(
+            client_id=client_id,
+            start_time=_iso_utc(end_time - timedelta(hours=window_h)),
+            end_time=_iso_utc(end_time),
+        )
+        return len(events) / window_h
 
     def daily_cough_counts(
         self,
         client_id: str,
-        days: int = 30,
+        days: int | None = None,
+        now: datetime | None = None,
     ) -> list[dict]:
-        """Return observed cough counts grouped by local calendar day.
-
-        Only days containing at least one stored cough event are returned.
-        A missing day is not automatically treated as zero because the
-        gateway may have been offline or the patient may not have been
-        monitored during that day.
-        """
-        if days <= 0:
+        """Return observed bout counts by local day; missing days are omitted."""
+        if days is not None and days <= 0:
             return []
 
-        now = datetime.now(timezone.utc)
-        events = self.dao.get_events(
-            client_id=client_id,
-            # Lấy dư một ngày để tránh cắt mất phần đầu của ngày biên.
-            start_time=(now - timedelta(days=days + 1)).isoformat(),
-            end_time=now.isoformat(),
-        )
-
-        daily_map: defaultdict[str, int] = defaultdict(int)
-
-        for event in events:
-            ts = _parse_ts(
-                event.get("event_ts") or event.get("received_ts")
+        now_utc = _as_utc(now)
+        start_time = None
+        if days is not None:
+            local_now = now_utc.astimezone(DISPLAY_TIMEZONE)
+            start_time = _iso_utc(
+                _local_midnight_utc(local_now.date() - timedelta(days=days - 1))
             )
-            if ts is not None:
-                daily_map[ts.strftime("%Y-%m-%d")] += 1
 
+        events = self.dao.get_events_by_occurrence(
+            client_id=client_id,
+            start_time=start_time,
+            end_time=_iso_utc(now_utc),
+        )
+        daily_map: defaultdict[str, int] = defaultdict(int)
+        for event in events:
+            occurred = _parse_ts(event.get("event_ts"))
+            if occurred is not None:
+                daily_map[occurred.strftime("%Y-%m-%d")] += 1
         return [
             {"date": key, "count": value}
             for key, value in sorted(daily_map.items())
@@ -138,99 +231,80 @@ class Analytics:
         alpha: float = 0.2,
         threshold_pct: float = 0.4,
         min_buffer: float = 5.0,
-        history_days: int = 30,
+        warmup_days: int = 7,
+        now: datetime | None = None,
     ) -> dict:
-        """Compare today's cough count with an EWMA baseline.
-
-        The first completed observed day initializes the baseline.
-        Abnormal historical days are evaluated but are not allowed to
-        increase the baseline.
-        """
+        """Compare today's observed bout count with the ongoing EWMA baseline."""
         if not 0.0 < alpha <= 1.0:
             raise ValueError("alpha must be in the range (0, 1]")
-
         if threshold_pct < 0.0:
             raise ValueError("threshold_pct must be non-negative")
-
         if min_buffer < 0.0:
             raise ValueError("min_buffer must be non-negative")
+        if warmup_days <= 0:
+            raise ValueError("warmup_days must be positive")
 
-        daily_counts = self.daily_cough_counts(
-            client_id=client_id,
-            days=history_days,
-        )
+        now_utc = _as_utc(now)
+        today = now_utc.astimezone(DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
+        daily_counts = self.daily_cough_counts(client_id=client_id, now=now_utc)
 
-        today = datetime.now(DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
-
-        today_count = 0
+        today_count: int | None = None
         completed_days: list[dict] = []
-
         for item in daily_counts:
             if item["date"] == today:
                 today_count = int(item["count"])
             elif item["date"] < today:
                 completed_days.append(item)
 
-        if not completed_days:
-            return {
-                "available": False,
-                "client_id": client_id,
-                "today": today,
-                "today_count": today_count,
-                "baseline": None,
-                "max_allowed": None,
-                "abnormal": False,
-                "observed_history_days": 0,
-                "reason": "no_completed_history",
-            }
-
-        baseline = float(completed_days[0]["count"])
-
-        for item in completed_days[1:]:
-            count = int(item["count"])
-            allowed_increase = max(
-                baseline * threshold_pct,
-                min_buffer,
-            )
-            max_allowed = baseline + allowed_increase
-            historical_abnormal = count > max_allowed
-
-            # Không để ngày bất thường kéo mức nền tăng lên.
-            if not historical_abnormal:
-                baseline = (
-                    alpha * count
-                    + (1.0 - alpha) * baseline
-                )
-
-        allowed_increase = max(
-            baseline * threshold_pct,
-            min_buffer,
-        )
-        max_allowed = baseline + allowed_increase
-        abnormal = today_count > max_allowed
-
-        return {
-            "available": True,
+        base = {
             "client_id": client_id,
             "today": today,
             "today_count": today_count,
-            "baseline": round(baseline, 2),
-            "max_allowed": round(max_allowed, 2),
-            "abnormal": abnormal,
+            "current_available": today_count is not None,
             "observed_history_days": len(completed_days),
+            "warmup_days": warmup_days,
+            "warmup_remaining": max(warmup_days - len(completed_days), 0),
             "alpha": alpha,
             "threshold_pct": threshold_pct,
             "min_buffer": min_buffer,
         }
 
-    def rate_previous(self, client_id: str, window_h: int = 24) -> float:
-        if window_h <= 0:
-            return 0.0
-        now = datetime.now(timezone.utc)
-        end_time = now - timedelta(hours=window_h)
-        events = self.dao.get_events(
-            client_id=client_id,
-            start_time=(end_time - timedelta(hours=window_h)).isoformat(),
-            end_time=end_time.isoformat(),
+        if len(completed_days) < warmup_days:
+            return {
+                **base,
+                "available": False,
+                "baseline": None,
+                "threshold": None,
+                "max_allowed": None,
+                "change_percent": None,
+                "above_baseline": False,
+                "abnormal": False,
+                "reason": "warmup",
+            }
+
+        baseline = float(completed_days[0]["count"])
+        for item in completed_days[1:]:
+            baseline = alpha * int(item["count"]) + (1.0 - alpha) * baseline
+
+        threshold = baseline + max(baseline * threshold_pct, min_buffer)
+        above = today_count is not None and today_count > threshold
+        change_percent = (
+            ((today_count - baseline) / baseline) * 100.0
+            if today_count is not None and baseline > 0
+            else None
         )
-        return len(events) / window_h
+
+        return {
+            **base,
+            "available": True,
+            "baseline": round(baseline, 2),
+            "threshold": round(threshold, 2),
+            # Backward-compatible aliases used by the existing rule/tests.
+            "max_allowed": round(threshold, 2),
+            "change_percent": (
+                round(change_percent, 1) if change_percent is not None else None
+            ),
+            "above_baseline": above,
+            "abnormal": above,
+            "reason": None if today_count is not None else "current_day_missing",
+        }

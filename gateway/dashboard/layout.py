@@ -1,28 +1,22 @@
-"""Page structure for the cough-monitor dashboard.
-
-Every Dash component id lives in the constants below and nowhere else --
-callbacks.py imports them, so layout and callbacks can never drift apart
-(mismatched ids are the #1 Dash beginner bug, see design/dashboard_and_tools.md).
-"""
+"""Minimal doctor-facing BreathSense dashboard layout."""
 
 from dash import dash_table, dcc, html
 
 POLL_INTERVAL_ID = "poll-interval"
 CLIENT_DROPDOWN_ID = "client-dropdown"
 RANGE_TOGGLE_ID = "range-toggle"
-FLEET_TABLE_ID = "fleet-table"
-LIVE_FEED_TABLE_ID = "live-feed-table"
 COUNT_CHART_ID = "count-chart"
 TYPE_PIE_ID = "type-pie"
-CLIENT_EVENTS_TABLE_ID = "client-events-table"
-SUGGESTIONS_LIST_ID = "suggestions-list"
-BASELINE_ALERTS_ID = "baseline-alerts"
+LIVE_FEED_TABLE_ID = "live-feed-table"
+TODAY_COUNT_ID = "today-count"
+LAST_RECEIVED_ID = "last-received"
+DAY_COUNT_ID = "day-count"
+NIGHT_COUNT_ID = "night-count"
+BASELINE_STATUS_ID = "baseline-status"
 
 POLL_INTERVAL_MS = 4000
-
 _FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 
-# Shared DataTable look: list view, hairline rules, recessive header.
 _TABLE_KWARGS = dict(
     style_as_list_view=True,
     cell_selectable=False,
@@ -32,7 +26,7 @@ _TABLE_KWARGS = dict(
         "fontSize": "13px",
         "color": "#0b0b0b",
         "backgroundColor": "transparent",
-        "padding": "6px 12px",
+        "padding": "8px 12px",
         "textAlign": "left",
         "border": "none",
         "borderBottom": "1px solid #e1e0d9",
@@ -55,66 +49,66 @@ def make_layout() -> html.Div:
             html.Header(
                 className="masthead",
                 children=[
-                    html.H1("Cough Monitor"),
-                    html.Span(
-                        "Fleet dashboard — healthcare provider view",
-                        className="subtitle",
-                    ),
+                    html.H1("BreathSense"),
+                    html.Span("Objective cough-bout monitoring", className="subtitle"),
                 ],
             ),
             dcc.Interval(id=POLL_INTERVAL_ID, interval=POLL_INTERVAL_MS),
-            _fleet_section(),
-            _client_section(),
-            _baseline_alerts_section(),
-            html.Div(
-                className="row",
-                children=[_live_feed_section(), _suggestions_section()],
-            ),
+            _patient_section(),
+            _monitoring_section(),
+            _baseline_section(),
+            _live_feed_section(),
         ],
     )
 
 
-def _fleet_section() -> html.Div:
+def _patient_section() -> html.Div:
     return html.Div(
-        className="card",
+        className="card patient-card",
         children=[
-            html.H2("Fleet overview"),
-            dash_table.DataTable(
-                id=FLEET_TABLE_ID,
-                columns=[
-                    {"name": "Device", "id": "device"},
-                    {"name": "Status", "id": "status"},
-                    {"name": "Client", "id": "client"},
-                    {"name": "Temperature", "id": "temperature"},
-                    {"name": "Humidity", "id": "humidity"},
-                    {"name": "Last seen", "id": "last_seen"},
-                ],
-                **_TABLE_KWARGS,
-            ),
-        ],
-    )
-
-
-def _client_section() -> html.Div:
-    return html.Div(
-        className="card",
-        children=[
-            html.H2("Client detail"),
             html.Div(
-                className="controls",
                 children=[
+                    html.Label("Patient", className="field-label"),
                     dcc.Dropdown(
                         id=CLIENT_DROPDOWN_ID,
-                        placeholder="Select a client…",
+                        placeholder="Select a patient...",
                         className="client-dropdown",
+                    ),
+                ]
+            ),
+            html.Div(
+                className="last-received-block",
+                children=[
+                    html.Span("Last data received", className="field-label"),
+                    html.Strong("—", id=LAST_RECEIVED_ID),
+                ],
+            ),
+        ],
+    )
+
+
+def _monitoring_section() -> html.Div:
+    return html.Div(
+        className="card",
+        children=[
+            html.H2("Cough monitoring"),
+            html.Div(
+                className="monitoring-header",
+                children=[
+                    html.Div(
+                        className="primary-kpi",
+                        children=[
+                            html.Span("Cough bouts today", className="kpi-label"),
+                            html.Strong("—", id=TODAY_COUNT_ID),
+                        ],
                     ),
                     dcc.RadioItems(
                         id=RANGE_TOGGLE_ID,
                         options=[
-                            {"label": "Hourly · 24 h", "value": "hour"},
-                            {"label": "Daily · 7 d", "value": "day"},
+                            {"label": "24 HOURS", "value": "24h"},
+                            {"label": "7 DAYS", "value": "7d"},
                         ],
-                        value="hour",
+                        value="24h",
                         inline=True,
                         className="range-toggle",
                     ),
@@ -135,50 +129,44 @@ def _client_section() -> html.Div:
                     ),
                 ],
             ),
-            html.H3("Recent events for this client"),
-            dash_table.DataTable(
-                id=CLIENT_EVENTS_TABLE_ID,
-                columns=[
-                    {"name": "Time", "id": "time"},
-                    {"name": "Device", "id": "device"},
-                    {"name": "Type", "id": "type"},
-                    {"name": "Bout", "id": "bout"},
+            html.Div(
+                className="day-night-row",
+                children=[
+                    html.Div(
+                        className="period-stat",
+                        children=[html.Span("Day"), html.Strong("—", id=DAY_COUNT_ID)],
+                    ),
+                    html.Div(
+                        className="period-stat",
+                        children=[
+                            html.Span("Night"),
+                            html.Strong("—", id=NIGHT_COUNT_ID),
+                        ],
+                    ),
                 ],
-                page_size=8,
-                **_TABLE_KWARGS,
+            ),
+            html.P(
+                "Wet/Dry are AI-based acoustic classifications.",
+                className="disclaimer",
             ),
         ],
     )
 
 
-def _baseline_alerts_section() -> html.Div:
-    """Dedicated display for EWMA baseline alerts."""
+def _baseline_section() -> html.Div:
     return html.Div(
-        className="card baseline-alert-card",
+        className="card baseline-card",
         children=[
+            html.H2("Statistical findings"),
             html.Div(
-                className="alert-heading-row",
-                children=[
-                    html.H2("Baseline alerts"),
-                    html.Span(
-                        "EWMA",
-                        className="alert-heading-badge",
-                    ),
-                ],
-            ),
-            html.Div(
-                id=BASELINE_ALERTS_ID,
-                className="baseline-alerts",
-                children=[
-                    html.P(
-                        "Select a client to evaluate the cough baseline.",
-                        className="baseline-alert-empty",
-                    )
-                ],
+                id=BASELINE_STATUS_ID,
+                children=html.P(
+                    "Select a patient to evaluate the recent personal baseline.",
+                    className="empty-state",
+                ),
             ),
             html.P(
-                "Alerts indicate deviation from the person's observed "
-                "cough baseline and are not a medical diagnosis.",
+                "Project-defined statistical finding. Not a clinical deterioration assessment.",
                 className="disclaimer",
             ),
         ],
@@ -187,35 +175,18 @@ def _baseline_alerts_section() -> html.Div:
 
 def _live_feed_section() -> html.Div:
     return html.Div(
-        className="card grow",
+        className="card",
         children=[
-            html.H2("Live feed"),
+            html.H2("Live Feed"),
             dash_table.DataTable(
                 id=LIVE_FEED_TABLE_ID,
                 columns=[
-                    {"name": "Received", "id": "time"},
-                    {"name": "Device", "id": "device"},
-                    {"name": "Client", "id": "client"},
-                    {"name": "Type", "id": "type"},
-                    {"name": "Bout", "id": "bout"},
+                    {"name": "Event time", "id": "event_time"},
+                    {"name": "Received time", "id": "received_time"},
+                    {"name": "Event", "id": "event"},
                 ],
                 page_size=10,
                 **_TABLE_KWARGS,
-            ),
-        ],
-    )
-
-
-def _suggestions_section() -> html.Div:
-    return html.Div(
-        className="card grow",
-        children=[
-            html.H2("Suggestions"),
-            html.Ul(id=SUGGESTIONS_LIST_ID, className="suggestions"),
-            html.P(
-                "Informational suggestions derived from cough data — "
-                "not clinical predictions or medical advice.",
-                className="disclaimer",
             ),
         ],
     )

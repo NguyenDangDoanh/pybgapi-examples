@@ -9,7 +9,7 @@ import threading
 import tempfile
 import types
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from gateway.app.dao import Dao
+from gateway.app.analytics import Analytics
 from gateway.app.event_processor import EventProcessor
 from gateway.app.fleet import Fleet
 
@@ -256,9 +257,129 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("stage2_valid", columns)
                 self.assertIn("prolonged", columns)
                 self.assertIn("duration_s", columns)
+                indexes = {
+                    item[1]
+                    for item in dao._get_conn().execute("PRAGMA index_list(cough_events)")
+                }
+                self.assertIn("ix_cough_client_event", indexes)
                 self.assertEqual([], dao.get_recent_environment(10))
             finally:
                 dao.close()
+
+
+class AnalyticsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.dao = Dao(str(Path(self.tempdir.name) / "analytics.db"))
+        self.dao.init_db(str(SCHEMA))
+        self.analytics = Analytics(self.dao)
+        self.device_id = "aa:bb:cc:dd:ee:90"
+        self.client_id = "client_analytics"
+        self.dao.upsert_device(self.device_id, client_id=self.client_id)
+        self.counter = 0
+
+    def tearDown(self) -> None:
+        self.dao.close()
+        self.tempdir.cleanup()
+
+    @staticmethod
+    def _iso(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+
+    def _insert(
+        self,
+        occurred: datetime,
+        received: datetime,
+        cough_type: str = "dry",
+        client_id: str | None = None,
+    ) -> None:
+        self.counter += 1
+        target_client = client_id or self.client_id
+        self.dao.insert_event(
+            {
+                "message_id": f"analytics-{target_client}-{self.counter}",
+                "session_id": "analytics-session",
+                "device_id": self.device_id,
+                "client_id": target_client,
+                "cough_type": cough_type,
+                "event_ts": self._iso(occurred),
+                "received_ts": self._iso(received),
+                "event_counter": self.counter,
+                "flags": 0,
+                "duration_s": 2,
+                "prolonged": False,
+            }
+        )
+
+    def test_occurrence_time_drives_ranges_replay_and_day_night(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        # 07:30 local (day) and 03:00 local (night), both inside last 24 h.
+        self._insert(now - timedelta(hours=11, minutes=30), now, "wet")
+        self._insert(now - timedelta(hours=16), now, "unknown")
+        # Received now after replay, but occurred four days ago: not in 24 h.
+        self._insert(now - timedelta(days=4), now, "dry")
+
+        stats = self.analytics.get_client_stats(self.client_id, now=now)
+
+        self.assertEqual(2, stats["last_24h_count"])
+        self.assertEqual(3, stats["last_7d_count"])
+        self.assertEqual(
+            {"wet": 1, "dry": 0, "unknown": 1}, stats["by_type_24h"]
+        )
+        self.assertEqual(
+            {"wet": 1, "dry": 1, "unknown": 1}, stats["by_type_7d"]
+        )
+        self.assertEqual({"day": 1, "night": 1}, stats["day_night_24h"])
+
+    def test_ewma_warmup_threshold_and_continuing_update(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        local_day_anchor_utc = datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc)
+        counts = [10, 20, 30, 40, 50, 60, 70]
+        for day_offset, count in enumerate(counts):
+            occurred = local_day_anchor_utc + timedelta(days=day_offset)
+            for _ in range(count):
+                self._insert(occurred, occurred + timedelta(seconds=1))
+        for _ in range(60):
+            self._insert(now - timedelta(hours=1), now)
+
+        status = self.analytics.ewma_baseline_status(self.client_id, now=now)
+
+        self.assertTrue(status["available"])
+        self.assertEqual(7, status["observed_history_days"])
+        self.assertEqual(0.2, status["alpha"])
+        self.assertEqual(40.49, status["baseline"])
+        self.assertEqual(56.68, status["threshold"])
+        self.assertTrue(status["above_baseline"])
+
+    def test_missing_day_is_not_zero_or_a_warmup_day(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        for day_offset in (1, 2, 3, 5, 6, 7):
+            occurred = now - timedelta(days=day_offset, hours=1)
+            self._insert(occurred, occurred + timedelta(seconds=1))
+
+        daily = self.analytics.daily_cough_counts(self.client_id, now=now)
+        status = self.analytics.ewma_baseline_status(self.client_id, now=now)
+
+        self.assertEqual(6, len(daily))
+        self.assertFalse(status["available"])
+        self.assertEqual("warmup", status["reason"])
+        self.assertEqual(1, status["warmup_remaining"])
+
+    def test_client_baselines_are_isolated(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        other_client = "client_other"
+        for day_offset in range(1, 8):
+            occurred = now - timedelta(days=day_offset, hours=1)
+            self._insert(occurred, occurred, client_id=other_client)
+
+        own = self.analytics.ewma_baseline_status(self.client_id, now=now)
+        other = self.analytics.ewma_baseline_status(other_client, now=now)
+
+        self.assertFalse(own["available"])
+        self.assertTrue(other["available"])
+        self.assertEqual(1.0, other["baseline"])
 
 
 class SocketConcurrencyTest(unittest.TestCase):

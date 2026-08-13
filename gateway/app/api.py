@@ -15,6 +15,12 @@ def _limit_arg(default: int = 50) -> int:
     return min(max(value or default, 1), 500)
 
 
+def _optional_limit_arg() -> int | None:
+    if "limit" not in request.args:
+        return None
+    return _limit_arg()
+
+
 def create_app(dao: Dao, analytics: Analytics, rules: Rules, fleet: Fleet) -> Flask:
     app = Flask(__name__)
 
@@ -29,6 +35,7 @@ def create_app(dao: Dao, analytics: Analytics, rules: Rules, fleet: Fleet) -> Fl
                 client_id=client_id,
                 start_time=request.args.get("from"),
                 end_time=request.args.get("to"),
+                limit=_optional_limit_arg(),
             )
         )
 
@@ -36,7 +43,11 @@ def create_app(dao: Dao, analytics: Analytics, rules: Rules, fleet: Fleet) -> Fl
     def client_stats(client_id: str):
         stats = analytics.get_client_stats(client_id)
         stats["suggestions"] = [
-            {"rule": suggestion.rule, "text": suggestion.text}
+            {
+                "rule": suggestion.rule,
+                "text": suggestion.text,
+                "category": suggestion.category,
+            }
             for suggestion in rules.evaluate(client_id)
         ]
         return jsonify(stats)

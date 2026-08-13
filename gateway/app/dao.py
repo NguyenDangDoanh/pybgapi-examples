@@ -94,6 +94,8 @@ class Dao:
                 ON cough_events(received_ts DESC);
             CREATE INDEX IF NOT EXISTS ix_cough_client_received
                 ON cough_events(client_id, received_ts DESC);
+            CREATE INDEX IF NOT EXISTS ix_cough_client_event
+                ON cough_events(client_id, event_ts DESC);
             CREATE UNIQUE INDEX IF NOT EXISTS ux_environment_message_id
                 ON environment_readings(message_id) WHERE message_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS ix_environment_device_received
@@ -176,7 +178,13 @@ class Dao:
         client_id: str,
         start_time: str | None = None,
         end_time: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Return transport-ordered events for audit and live-feed use.
+
+        Time filters intentionally use ``received_ts``. Occurrence-time
+        analytics must use :meth:`get_events_by_occurrence` instead.
+        """
         sql = "SELECT * FROM cough_events WHERE client_id = ?"
         params: list[object] = [client_id]
         if start_time is not None:
@@ -186,6 +194,32 @@ class Dao:
             sql += " AND received_ts <= ?"
             params.append(end_time)
         sql += " ORDER BY received_ts DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(self._clamp_limit(limit))
+        with self._lock:
+            return self._rows(self._get_conn().execute(sql, params))
+
+    def get_events_by_occurrence(
+        self,
+        client_id: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return cough bouts filtered by their captured occurrence time.
+
+        ``event_ts`` is the bout start time. This keeps offline FIFO replay in
+        the hour/day where the bout occurred instead of the reconnect window.
+        """
+        sql = "SELECT * FROM cough_events WHERE client_id = ?"
+        params: list[object] = [client_id]
+        if start_time is not None:
+            sql += " AND event_ts >= ?"
+            params.append(start_time)
+        if end_time is not None:
+            sql += " AND event_ts <= ?"
+            params.append(end_time)
+        sql += " ORDER BY event_ts ASC, id ASC"
         with self._lock:
             return self._rows(self._get_conn().execute(sql, params))
 
@@ -295,10 +329,10 @@ class Dao:
     def get_hourly_counts(self, client_id: str) -> list[dict[str, Any]]:
         start_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         sql = """
-            SELECT strftime('%Y-%m-%d %H:00:00', received_ts) AS time_bucket,
+            SELECT strftime('%Y-%m-%d %H:00:00', event_ts) AS time_bucket,
                    cough_type, COUNT(*) AS count
             FROM cough_events
-            WHERE client_id = ? AND received_ts >= ?
+            WHERE client_id = ? AND event_ts >= ?
             GROUP BY time_bucket, cough_type
             ORDER BY time_bucket ASC
         """
@@ -308,10 +342,10 @@ class Dao:
     def get_daily_counts(self, client_id: str) -> list[dict[str, Any]]:
         start_time = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         sql = """
-            SELECT strftime('%Y-%m-%d', received_ts) AS time_bucket,
+            SELECT strftime('%Y-%m-%d', event_ts) AS time_bucket,
                    cough_type, COUNT(*) AS count
             FROM cough_events
-            WHERE client_id = ? AND received_ts >= ?
+            WHERE client_id = ? AND event_ts >= ?
             GROUP BY time_bucket, cough_type
             ORDER BY time_bucket ASC
         """

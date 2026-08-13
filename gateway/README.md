@@ -91,9 +91,11 @@ The cough-bout firmware assigns the flag bits as follows:
 
 `UNKNOWN` is still a valid cough event, including when `prolonged=true`; it
 means Stage 2 did not confidently choose dry or wet. The gateway persists the
-raw flags and all decoded fields. The live and client event tables display the
-estimated duration and label prolonged bouts as `requires observation`. This
-is a monitoring indication, not a diagnosis.
+raw flags and all decoded fields. Current firmware sends one notification when
+a cough bout is completed: `event_ts` is the bout start, `duration_s` is its
+estimated duration, and `event_counter` is the completed-bout counter. The
+Live Feed labels rows as `Cough bout` or `Prolonged bout`; prolonged remains
+firmware monitoring metadata, not a clinical severity assessment.
 
 The authoritative backward-compatible timestamp rule remains the raw value:
 `event_ts > 0` uses node Unix time and `event_ts == 0` uses `received_ts`.
@@ -159,6 +161,41 @@ uses it per node and host session to reject duplicate replay, report missing
 events, recognize the `65535 -> 0` wrap, and distinguish a backward reset from
 a wrap. Reconnect does not clear the gateway's counter state.
 
+## Dashboard analytics
+
+Occurrence-time analytics always filter and group by `event_ts`. A bout that
+occurred at 01:15 and was replayed after an 08:00 reconnect remains in the
+01:15 hour/day. `received_ts` is retained for Last data received, Live Feed
+transport audit, and debugging.
+
+The doctor dashboard contains:
+
+- the selected patient and last Pi receive time;
+- the observed cough-bout count for the current local calendar day;
+- a 24-hour hourly trend or 7-day daily trend;
+- Wet/Dry/Unknown distribution for the selected range only;
+- Day (06:00-17:59) and Night (18:00-05:59) totals for that range;
+- a recent personal bout baseline and a patient-specific Live Feed.
+
+The Live Feed shows both `event_ts` and `received_ts` and combines the acoustic
+type, bout label, and estimated duration in one Event field. It does not expose
+a separate BOUT/Prolonged column.
+
+The recent personal baseline is a project-defined EWMA with `alpha = 0.2`.
+Seven completed observed days are required for warm-up. It continues updating
+after warm-up and is not a rolling seven-day window. Missing/unavailable days
+are omitted instead of being invented as zero. The statistical threshold is:
+
+```text
+EWMA baseline + max(EWMA baseline * 0.40, 5)
+```
+
+This is a project-defined statistical finding, not a clinical deterioration
+assessment. There is one whole-day baseline; Day and Night do not have
+separate baselines. The current payload does not contain the number of
+individual cough sounds inside a bout, so the gateway does not infer that
+quantity or run a second bout-grouping state machine.
+
 ## Optional environment variables
 
 ```bash
@@ -178,8 +215,10 @@ python -m unittest discover -s tests -v
 ```
 
 The tests cover legacy and extended timestamps, fixed-size bout-flag decoding
-and persistence, two nodes using the same event counter, duplicate replay
-across reconnect, uint16 wrap, environment persistence and validation,
-old-database migration, concurrent socket clients, per-connection BLE
-notification routing, optional Time discovery/write, isolated write failure,
-and fleet-wide UTC-date resynchronization.
+and persistence, occurrence-time replay analytics, range-specific cough types,
+Day/Night grouping, EWMA warm-up/threshold/missing-day behavior, client
+isolation, two nodes using the same event counter, duplicate replay across
+reconnect, uint16 wrap, environment persistence and validation, old-database
+migration, concurrent socket clients, per-connection BLE notification routing,
+optional Time discovery/write, isolated write failure, and fleet-wide UTC-date
+resynchronization.

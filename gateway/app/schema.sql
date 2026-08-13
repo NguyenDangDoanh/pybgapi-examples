@@ -44,3 +44,6 @@ CREATE TABLE IF NOT EXISTS environment_readings (
     payload_hex         TEXT,
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
 );
+
+CREATE INDEX IF NOT EXISTS ix_cough_client_event
+    ON cough_events(client_id, event_ts DESC);
