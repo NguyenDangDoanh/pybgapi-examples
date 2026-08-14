@@ -338,6 +338,25 @@ class AnalyticsTest(unittest.TestCase):
         )
         self.assertEqual({"day": 1, "night": 1}, stats["day_night_24h"])
 
+    def test_default_24h_window_ends_at_last_received_time(self) -> None:
+        last_received = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+        self._insert(
+            last_received - timedelta(hours=25),
+            last_received,
+            "dry",
+        )
+        self._insert(
+            last_received - timedelta(hours=1),
+            last_received - timedelta(seconds=1),
+            "wet",
+        )
+
+        stats = self.analytics.get_client_stats(self.client_id)
+
+        self.assertEqual(self._iso(last_received), stats["analysis_anchor_ts"])
+        self.assertEqual(1, stats["last_24h_count"])
+        self.assertEqual(2, sum(item["count"] for item in stats["per_hour_history"]))
+
     def test_ewma_warmup_threshold_and_continuing_update(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
         local_day_anchor_utc = datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc)

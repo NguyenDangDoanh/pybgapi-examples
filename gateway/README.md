@@ -172,7 +172,7 @@ The doctor dashboard contains:
 
 - a Device list with assignment, connection status, environment values, and
   last-seen time;
-- the selected patient and last Pi receive time;
+- the patient selector and last Pi receive time inside Cough monitoring;
 - the observed cough-bout count for the current local calendar day;
 - a 24-hour hourly trend or 7-day daily trend;
 - Wet/Dry/Unknown distribution for the selected range only;
@@ -182,6 +182,18 @@ The doctor dashboard contains:
 The Live Feed shows both `event_ts` and `received_ts` and combines the acoustic
 type, bout label, and estimated duration in one Event field. It does not expose
 a separate BOUT/Prolonged column.
+
+The 24-hour window ends at the selected patient's latest `received_ts`, rather
+than the current wall-clock time. Its bars remain grouped by bout `event_ts`.
+The initial viewport shows exactly that 24-hour interval; horizontal dragging
+pans into up to seven days of earlier hourly history. Zoom controls and the
+line connecting bar peaks are deliberately disabled. Hour-axis labels show
+only local clock time; the full date remains available in hover details and in
+Last data received.
+
+The dashboard client/device selectors suppress legacy `client_test_alert`,
+`device_test_alert`, and unassigned rows. This presentation filter does not
+delete database records automatically.
 
 The recent personal baseline is a project-defined EWMA with `alpha = 0.2`.
 Seven completed observed days are required for warm-up. It continues updating

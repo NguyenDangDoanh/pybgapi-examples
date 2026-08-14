@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import dash
@@ -55,6 +55,7 @@ def register(app: dash.Dash) -> None:
         options = [
             {"label": client["client_id"], "value": client["client_id"]}
             for client in clients
+            if _visible_patient(client.get("client_id"))
         ]
         return dash.no_update if options == current_options else options
 
@@ -76,6 +77,7 @@ def register(app: dash.Dash) -> None:
                 "last_seen": _fmt_ts(device.get("last_seen")),
             }
             for device in devices
+            if _visible_device(device)
         ]
 
     @app.callback(
@@ -105,7 +107,7 @@ def register(app: dash.Dash) -> None:
         day_night = stats.get("day_night_7d" if is_7d else "day_night_24h", {})
         today_count = stats.get("today_count")
         return (
-            _count_figure(stats, range_mode),
+            _count_figure(stats, range_mode, client_id),
             _type_figure(stats, range_mode),
             str(day_night.get("day", 0)),
             str(day_night.get("night", 0)),
@@ -123,17 +125,36 @@ def register(app: dash.Dash) -> None:
         )
 
 
-def _count_figure(stats: dict, range_mode: str) -> go.Figure:
+def _count_figure(stats: dict, range_mode: str, client_id: str) -> go.Figure:
     if range_mode == "7d":
         points = stats.get("per_day", [])
         x = [point.get("date") for point in points]
         y = [point.get("count", 0) for point in points]
         title = f"Cough-bout trend — last 7 days ({stats.get('last_7d_count', 0)})"
+        xaxis_options = {
+            "type": "date",
+            "tickformat": "%m-%d",
+            "fixedrange": True,
+        }
+        dragmode = False
     else:
-        points = stats.get("per_hour", [])
-        x = [_short_hour(point.get("ts")) for point in points]
+        points = stats.get("per_hour_history", stats.get("per_hour", []))
+        x = [point.get("ts") for point in points]
         y = [point.get("count", 0) for point in points]
         title = f"Cough-bout trend — last 24 hours ({stats.get('last_24h_count', 0)})"
+        anchor = _parse_datetime(stats.get("analysis_anchor_ts"))
+        xaxis_options = {
+            "type": "date",
+            "tickformat": "%H:%M",
+            "hoverformat": "%m-%d %H:%M",
+            "fixedrange": False,
+        }
+        if anchor is not None:
+            xaxis_options["range"] = [
+                anchor - timedelta(hours=24),
+                anchor,
+            ]
+        dragmode = "pan"
 
     fig = go.Figure()
     fig.add_bar(
@@ -145,17 +166,15 @@ def _count_figure(stats: dict, range_mode: str) -> go.Figure:
         name="Bout count",
         hovertemplate="%{x}: %{y} bouts<extra></extra>",
     )
-    fig.add_scatter(
-        x=x,
-        y=y,
-        mode="lines+markers",
-        line={"color": "#174f92", "width": 2},
-        marker={"size": 6},
-        name="Trend",
-        hovertemplate="%{x}: %{y} bouts<extra></extra>",
-    )
     _apply_chrome(fig, title)
-    fig.update_layout(bargap=0.32, xaxis_type="category", showlegend=False)
+    fig.update_layout(
+        bargap=0.32,
+        showlegend=False,
+        dragmode=dragmode,
+        uirevision=f"{client_id}:{range_mode}",
+        xaxis=xaxis_options,
+    )
+    fig.update_yaxes(fixedrange=True)
     return fig
 
 
@@ -264,14 +283,25 @@ def _event_label(event: dict) -> str:
     return f"{cough_type} · {label}{duration_text}"
 
 
-def _short_hour(value: str | None) -> str:
+def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
-        return "—"
+        return None
     try:
-        parsed = datetime.fromisoformat(value)
-        return parsed.strftime("%m-%d %H:00")
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except (TypeError, ValueError):
-        return str(value)
+        return None
+
+
+def _visible_patient(client_id) -> bool:
+    normalized = str(client_id or "").strip().lower()
+    return normalized not in {"", "unknown", "unassigned", "client_test_alert"}
+
+
+def _visible_device(device: dict) -> bool:
+    device_id = str(device.get("device_id") or "").strip().lower()
+    return device_id != "device_test_alert" and _visible_patient(
+        device.get("client_id")
+    )
 
 
 def _fmt_ts(value: str | None) -> str:

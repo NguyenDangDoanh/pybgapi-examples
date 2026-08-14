@@ -55,7 +55,6 @@ def make_layout() -> html.Div:
                 ],
             ),
             dcc.Interval(id=POLL_INTERVAL_ID, interval=POLL_INTERVAL_MS),
-            _patient_section(),
             _fleet_section(),
             _monitoring_section(),
             _baseline_section(),
@@ -86,36 +85,33 @@ def _fleet_section() -> html.Div:
     )
 
 
-def _patient_section() -> html.Div:
-    return html.Div(
-        className="card patient-card",
-        children=[
-            html.Div(
-                children=[
-                    html.Label("Patient", className="field-label"),
-                    dcc.Dropdown(
-                        id=CLIENT_DROPDOWN_ID,
-                        placeholder="Select a patient...",
-                        className="client-dropdown",
-                    ),
-                ]
-            ),
-            html.Div(
-                className="last-received-block",
-                children=[
-                    html.Span("Last data received", className="field-label"),
-                    html.Strong("—", id=LAST_RECEIVED_ID),
-                ],
-            ),
-        ],
-    )
-
-
 def _monitoring_section() -> html.Div:
     return html.Div(
         className="card",
         children=[
             html.H2("Cough monitoring"),
+            html.Div(
+                className="patient-card",
+                children=[
+                    html.Div(
+                        children=[
+                            html.Label("Patient", className="field-label"),
+                            dcc.Dropdown(
+                                id=CLIENT_DROPDOWN_ID,
+                                placeholder="Select a patient...",
+                                className="client-dropdown",
+                            ),
+                        ]
+                    ),
+                    html.Div(
+                        className="last-received-block",
+                        children=[
+                            html.Span("Last data received", className="field-label"),
+                            html.Strong("—", id=LAST_RECEIVED_ID),
+                        ],
+                    ),
+                ],
+            ),
             html.Div(
                 className="monitoring-header",
                 children=[
@@ -143,7 +139,11 @@ def _monitoring_section() -> html.Div:
                 children=[
                     dcc.Graph(
                         id=COUNT_CHART_ID,
-                        config={"displayModeBar": False},
+                        config={
+                            "displayModeBar": False,
+                            "scrollZoom": False,
+                            "doubleClick": False,
+                        },
                         className="chart",
                     ),
                     dcc.Graph(

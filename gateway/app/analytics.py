@@ -82,10 +82,23 @@ class Analytics:
     def get_client_stats(
         self, client_id: str, now: datetime | None = None
     ) -> dict:
-        now_utc = _as_utc(now)
+        transport_events = self.dao.get_events(client_id=client_id, limit=1)
+        last_received_ts = (
+            transport_events[0].get("received_ts") if transport_events else None
+        )
+        if now is None and last_received_ts:
+            parsed_anchor = _parse_ts(last_received_ts)
+            now_utc = (
+                parsed_anchor.astimezone(timezone.utc)
+                if parsed_anchor is not None
+                else _as_utc(None)
+            )
+        else:
+            now_utc = _as_utc(now)
         local_now = now_utc.astimezone(DISPLAY_TIMEZONE)
         start_24h = now_utc - timedelta(hours=24)
         start_7d = _local_midnight_utc(local_now.date() - timedelta(days=6))
+        start_hour_history = now_utc - timedelta(days=7)
 
         events_24h = self.dao.get_events_by_occurrence(
             client_id=client_id,
@@ -95,6 +108,11 @@ class Analytics:
         events_7d = self.dao.get_events_by_occurrence(
             client_id=client_id,
             start_time=_iso_utc(start_7d),
+            end_time=_iso_utc(now_utc),
+        )
+        events_hour_history = self.dao.get_events_by_occurrence(
+            client_id=client_id,
+            start_time=_iso_utc(start_hour_history),
             end_time=_iso_utc(now_utc),
         )
 
@@ -110,7 +128,14 @@ class Analytics:
             if occurred is not None:
                 daily_map[occurred.strftime("%Y-%m-%d")] += 1
 
-        transport_events = self.dao.get_events(client_id=client_id, limit=1)
+        hourly_history_map: defaultdict[str, int] = defaultdict(int)
+        for event in events_hour_history:
+            occurred = _parse_ts(event.get("event_ts"))
+            if occurred is not None:
+                hourly_history_map[
+                    occurred.strftime("%Y-%m-%dT%H:00:00%z")
+                ] += 1
+
         all_events = self.dao.get_events(client_id=client_id)
         baseline = self.ewma_baseline_status(client_id, now=now_utc)
 
@@ -132,6 +157,10 @@ class Analytics:
                 {"date": key, "count": value}
                 for key, value in sorted(daily_map.items())
             ],
+            "per_hour_history": [
+                {"ts": key, "count": value}
+                for key, value in sorted(hourly_history_map.items())
+            ],
             "last_24h_count": len(events_24h),
             "last_7d_count": len(events_7d),
             "today_count": baseline["today_count"],
@@ -140,9 +169,8 @@ class Analytics:
             "day_night_24h": day_night_24h,
             "day_night_7d": day_night_7d,
             "baseline": baseline,
-            "last_received_ts": (
-                transport_events[0].get("received_ts") if transport_events else None
-            ),
+            "last_received_ts": last_received_ts,
+            "analysis_anchor_ts": _iso_utc(now_utc),
         }
 
     def hourly_counts(
