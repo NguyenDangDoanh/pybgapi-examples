@@ -82,12 +82,20 @@ class Analytics:
     def get_client_stats(
         self, client_id: str, now: datetime | None = None
     ) -> dict:
+        occurrence_events = self.dao.get_events_by_occurrence(
+            client_id=client_id,
+            limit=1,
+            descending=True,
+        )
+        last_event_ts = (
+            occurrence_events[0].get("event_ts") if occurrence_events else None
+        )
         transport_events = self.dao.get_events(client_id=client_id, limit=1)
         last_received_ts = (
             transport_events[0].get("received_ts") if transport_events else None
         )
-        if now is None and last_received_ts:
-            parsed_anchor = _parse_ts(last_received_ts)
+        if now is None and last_event_ts:
+            parsed_anchor = _parse_ts(last_event_ts)
             now_utc = (
                 parsed_anchor.astimezone(timezone.utc)
                 if parsed_anchor is not None
@@ -169,6 +177,9 @@ class Analytics:
             "day_night_24h": day_night_24h,
             "day_night_7d": day_night_7d,
             "baseline": baseline,
+            "last_event_ts": last_event_ts,
+            # Transport receipt remains available to API consumers for audit
+            # and reconnect diagnostics, but does not drive patient analytics.
             "last_received_ts": last_received_ts,
             "analysis_anchor_ts": _iso_utc(now_utc),
         }
@@ -203,20 +214,6 @@ class Analytics:
             client_id=client_id,
             start_time=_iso_utc(now_utc - timedelta(hours=window_h)),
             end_time=_iso_utc(now_utc),
-        )
-        return len(events) / window_h
-
-    def rate_previous(
-        self, client_id: str, window_h: int = 24, now: datetime | None = None
-    ) -> float:
-        if window_h <= 0:
-            return 0.0
-        now_utc = _as_utc(now)
-        end_time = now_utc - timedelta(hours=window_h)
-        events = self.dao.get_events_by_occurrence(
-            client_id=client_id,
-            start_time=_iso_utc(end_time - timedelta(hours=window_h)),
-            end_time=_iso_utc(end_time),
         )
         return len(events) / window_h
 

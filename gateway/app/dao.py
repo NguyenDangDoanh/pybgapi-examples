@@ -180,7 +180,7 @@ class Dao:
         end_time: str | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return transport-ordered events for audit and live-feed use.
+        """Return transport-ordered events for audit use.
 
         Time filters intentionally use ``received_ts``. Occurrence-time
         analytics must use :meth:`get_events_by_occurrence` instead.
@@ -205,6 +205,8 @@ class Dao:
         client_id: str,
         start_time: str | None = None,
         end_time: str | None = None,
+        limit: int | None = None,
+        descending: bool = False,
     ) -> list[dict[str, Any]]:
         """Return cough bouts filtered by their captured occurrence time.
 
@@ -219,7 +221,11 @@ class Dao:
         if end_time is not None:
             sql += " AND event_ts <= ?"
             params.append(end_time)
-        sql += " ORDER BY event_ts ASC, id ASC"
+        direction = "DESC" if descending else "ASC"
+        sql += f" ORDER BY event_ts {direction}, id {direction}"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(self._clamp_limit(limit))
         with self._lock:
             return self._rows(self._get_conn().execute(sql, params))
 

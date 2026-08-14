@@ -14,7 +14,6 @@ from .api import create_app
 from .dao import Dao
 from .event_processor import EventProcessor
 from .fleet import Fleet
-from .rules import Rules
 from .socket_server import SocketServer
 
 HOST = os.environ.get("GATEWAY_HOST", "0.0.0.0")
@@ -36,7 +35,6 @@ def main() -> None:
 
     fleet = Fleet(dao)
     analytics = Analytics(dao)
-    rules = Rules(analytics)
     processor = EventProcessor(dao, fleet)
     socket_server = SocketServer(sock_path=SOCKET_PATH)
     socket_thread = threading.Thread(
@@ -53,7 +51,7 @@ def main() -> None:
         dao.close()
         raise SystemExit(f"Gateway socket startup failed: {socket_server.startup_error}")
 
-    flask_app = create_app(dao, analytics, rules, fleet)
+    flask_app = create_app(dao, analytics, fleet)
     create_dash(flask_app)
     try:
         flask_app.run(host=HOST, port=PORT, debug=False, threaded=True)

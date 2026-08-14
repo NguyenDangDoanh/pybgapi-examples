@@ -7,7 +7,6 @@ from flask import Flask, abort, jsonify, request
 from .analytics import Analytics
 from .dao import Dao
 from .fleet import Fleet
-from .rules import Rules
 
 
 def _limit_arg(default: int = 50) -> int:
@@ -21,7 +20,7 @@ def _optional_limit_arg() -> int | None:
     return _limit_arg()
 
 
-def create_app(dao: Dao, analytics: Analytics, rules: Rules, fleet: Fleet) -> Flask:
+def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
     app = Flask(__name__)
 
     @app.get("/api/clients")
@@ -30,27 +29,27 @@ def create_app(dao: Dao, analytics: Analytics, rules: Rules, fleet: Fleet) -> Fl
 
     @app.get("/api/clients/<client_id>/events")
     def client_events(client_id: str):
-        return jsonify(
-            dao.get_events(
-                client_id=client_id,
-                start_time=request.args.get("from"),
-                end_time=request.args.get("to"),
-                limit=_optional_limit_arg(),
+        order = request.args.get("order", "received").strip().lower()
+        query = {
+            "client_id": client_id,
+            "start_time": request.args.get("from"),
+            "end_time": request.args.get("to"),
+            "limit": _optional_limit_arg(),
+        }
+        if order == "event":
+            events = dao.get_events_by_occurrence(
+                **query,
+                descending=True,
             )
-        )
+        elif order == "received":
+            events = dao.get_events(**query)
+        else:
+            abort(400, description="order must be 'event' or 'received'")
+        return jsonify(events)
 
     @app.get("/api/clients/<client_id>/stats")
     def client_stats(client_id: str):
-        stats = analytics.get_client_stats(client_id)
-        stats["suggestions"] = [
-            {
-                "rule": suggestion.rule,
-                "text": suggestion.text,
-                "category": suggestion.category,
-            }
-            for suggestion in rules.evaluate(client_id)
-        ]
-        return jsonify(stats)
+        return jsonify(analytics.get_client_stats(client_id))
 
     @app.get("/api/devices")
     def list_devices():

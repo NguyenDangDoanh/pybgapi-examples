@@ -10,7 +10,7 @@ COUNT_CHART_ID = "count-chart"
 TYPE_PIE_ID = "type-pie"
 LIVE_FEED_TABLE_ID = "live-feed-table"
 TODAY_COUNT_ID = "today-count"
-LAST_RECEIVED_ID = "last-received"
+LAST_EVENT_ID = "last-event"
 DAY_COUNT_ID = "day-count"
 NIGHT_COUNT_ID = "night-count"
 BASELINE_STATUS_ID = "baseline-status"
@@ -106,8 +106,8 @@ def _monitoring_section() -> html.Div:
                     html.Div(
                         className="last-received-block",
                         children=[
-                            html.Span("Last data received", className="field-label"),
-                            html.Strong("—", id=LAST_RECEIVED_ID),
+                            html.Span("Last cough event", className="field-label"),
+                            html.Strong("—", id=LAST_EVENT_ID),
                         ],
                     ),
                 ],
@@ -198,7 +198,6 @@ def _live_feed_section() -> html.Div:
                 id=LIVE_FEED_TABLE_ID,
                 columns=[
                     {"name": "Event time", "id": "event_time"},
-                    {"name": "Received time", "id": "received_time"},
                     {"name": "Event", "id": "event"},
                 ],
                 page_size=10,

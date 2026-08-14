@@ -338,24 +338,36 @@ class AnalyticsTest(unittest.TestCase):
         )
         self.assertEqual({"day": 1, "night": 1}, stats["day_night_24h"])
 
-    def test_default_24h_window_ends_at_last_received_time(self) -> None:
-        last_received = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
+    def test_default_24h_window_ends_at_latest_event_time(self) -> None:
+        last_event = datetime(2026, 8, 5, 8, 0, tzinfo=timezone.utc)
+        delayed_reconnect = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
         self._insert(
-            last_received - timedelta(hours=25),
-            last_received,
+            last_event - timedelta(hours=25),
+            delayed_reconnect,
             "dry",
         )
         self._insert(
-            last_received - timedelta(hours=1),
-            last_received - timedelta(seconds=1),
+            last_event - timedelta(hours=1),
+            last_event + timedelta(seconds=1),
             "wet",
         )
+        self._insert(last_event, last_event + timedelta(seconds=2), "dry")
 
         stats = self.analytics.get_client_stats(self.client_id)
 
-        self.assertEqual(self._iso(last_received), stats["analysis_anchor_ts"])
-        self.assertEqual(1, stats["last_24h_count"])
-        self.assertEqual(2, sum(item["count"] for item in stats["per_hour_history"]))
+        self.assertEqual(self._iso(last_event), stats["analysis_anchor_ts"])
+        self.assertEqual(self._iso(last_event), stats["last_event_ts"])
+        self.assertEqual(self._iso(delayed_reconnect), stats["last_received_ts"])
+        self.assertEqual(2, stats["last_24h_count"])
+        self.assertEqual(3, sum(item["count"] for item in stats["per_hour_history"]))
+
+        live_feed = self.dao.get_events_by_occurrence(
+            self.client_id, limit=2, descending=True
+        )
+        self.assertEqual(
+            [self._iso(last_event), self._iso(last_event - timedelta(hours=1))],
+            [event["event_ts"] for event in live_feed],
+        )
 
     def test_ewma_warmup_threshold_and_continuing_update(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)

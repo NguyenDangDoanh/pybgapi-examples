@@ -161,54 +161,109 @@ uses it per node and host session to reject duplicate replay, report missing
 events, recognize the `65535 -> 0` wrap, and distinguish a backward reset from
 a wrap. Reconnect does not clear the gateway's counter state.
 
-## Dashboard analytics
+## Current data flow and timestamp responsibilities
 
-Occurrence-time analytics always filter and group by `event_ts`. A bout that
-occurred at 01:15 and was replayed after an 08:00 reconnect remains in the
-01:15 hour/day. `received_ts` is retained for Last data received, Live Feed
-transport audit, and debugging.
+The two timestamps have deliberately different responsibilities:
+
+| Field | Meaning | Used by |
+| --- | --- | --- |
+| `event_ts` | When the patient actually coughed | Patient timeline, Live Feed ordering, 24-hour/7-day charts, Wet/Dry/Unknown, Day/Night, daily totals, and baseline |
+| `received_ts` | When the Pi received or replayed the notification | Transport audit, reconnect diagnostics, database ordering for the default audit API |
+| `node_event_timestamp` | Raw uint32 sent by the firmware | Diagnosing whether the node sent a synchronized epoch or legacy zero |
+| `timestamp_source` | `node_unix_seconds` or `gateway_received` | Explaining how the stored `event_ts` was selected |
+| `event_counter` | Per-node uint16 completed-bout sequence | Duplicate/missing-event checks, wrap handling, and offline replay |
+
+The processing path is:
+
+1. The xG26 captures the bout start time and completed-bout metadata.
+2. The Pi decodes the fixed 8-byte notification without changing its wire
+   format.
+3. `EventProcessor` stores both patient occurrence time and Pi receipt time.
+   For legacy `event_ts == 0`, occurrence time safely falls back to receipt
+   time. For extended `event_ts > 0`, the node time is preserved.
+4. SQLite retains raw flags, decoded bout metadata, counter, both timestamps,
+   and timestamp provenance.
+5. Analytics query by `event_ts`; delayed FIFO replay therefore returns to the
+   hour and day in which the cough really occurred.
+6. Flask exposes the stored data and Dash renders the patient view. The BLE
+   host, backend socket, API, and dashboard remain independent stages.
+
+For example, a bout captured at 01:15 and delivered after an 08:00 reconnect is
+shown at 01:15. The 08:00 receipt remains in SQLite for diagnostics but cannot
+move the bout into the reconnect window.
+
+## Dashboard behavior
 
 The doctor dashboard contains:
 
-- a Device list with assignment, connection status, environment values, and
-  last-seen time;
-- the patient selector and last Pi receive time inside Cough monitoring;
-- the observed cough-bout count for the current local calendar day;
+- a Device list above the patient view, with assignment, connection status,
+  latest environment values, and last-seen time;
+- the patient selector and **Last cough event** (`MAX(event_ts)`) inside Cough
+  monitoring;
+- the observed cough-bout count for the local calendar date containing the
+  patient's latest event;
 - a 24-hour hourly trend or 7-day daily trend;
-- Wet/Dry/Unknown distribution for the selected range only;
-- Day (06:00-17:59) and Night (18:00-05:59) totals for that range;
-- a recent personal bout baseline and a patient-specific Live Feed.
+- Wet/Dry/Unknown distribution computed from exactly the selected range;
+- Day (06:00-17:59) and Night (18:00-05:59) totals from that same range;
+- one recent personal bout baseline and a patient-specific Live Feed.
 
-The Live Feed shows both `event_ts` and `received_ts` and combines the acoustic
-type, bout label, and estimated duration in one Event field. It does not expose
-a separate BOUT/Prolonged column.
+### Range anchoring
 
-The 24-hour window ends at the selected patient's latest `received_ts`, rather
-than the current wall-clock time. Its bars remain grouped by bout `event_ts`.
-The initial viewport shows exactly that 24-hour interval; horizontal dragging
-pans into up to seven days of earlier hourly history. Zoom controls and the
-line connecting bar peaks are deliberately disabled. Hour-axis labels show
-only local clock time; the full date remains available in hover details and in
-Last data received.
+With no explicit analysis time supplied, the selected patient's latest
+`event_ts` is the single analysis anchor:
+
+```text
+24-hour range = [latest event_ts - 24 hours, latest event_ts]
+7-day range   = local date of latest event plus the six preceding local dates
+```
+
+This anchor is shared by the trend, type distribution, Day/Night totals, daily
+count, and baseline. A late `received_ts` from offline replay never extends or
+shifts the patient window. When a patient or range changes, or a genuinely
+newer cough arrives, the graph returns naturally to the latest anchored view.
+
+The 24-hour chart groups events into local hourly bars. Horizontal dragging
+pans left into up to seven days of earlier hourly history. There is no separate
+"latest" button, no zoom control, and no line connecting bar peaks. Axis labels
+show local clock time; hover details contain the date and time.
+
+### Live Feed
+
+Live Feed is always visible and is sorted newest-first by `event_ts`. It shows:
+
+- **Event time**: the patient's cough time;
+- **Event**: Wet/Dry/Unknown, `Cough bout` or `Prolonged bout`, and firmware
+  duration when present.
+
+There is no separate BOUT column and no Received time column. `received_ts`
+has not been deleted: it remains in SQLite and is still returned by the API for
+transport audit. `/api/clients/<client_id>/events` defaults to receipt order;
+the dashboard requests `?order=event` for occurrence order.
+
+The former `Suggestions` engine and API field have been removed. Its two
+automatic messages duplicated the baseline presentation or compared adjacent
+24-hour transport windows without adding patient context. Baseline status is
+now the only automatic statistical finding shown.
 
 The dashboard client/device selectors suppress legacy `client_test_alert`,
 `device_test_alert`, and unassigned rows. This presentation filter does not
 delete database records automatically.
 
-The recent personal baseline is a project-defined EWMA with `alpha = 0.2`.
-Seven completed observed days are required for warm-up. It continues updating
-after warm-up and is not a rolling seven-day window. Missing/unavailable days
-are omitted instead of being invented as zero. The statistical threshold is:
+## Personal baseline
+
+The recent personal baseline is an EWMA with `alpha = 0.2`. Seven completed
+observed days are required for warm-up. It continues updating after warm-up
+and is not a rolling seven-day window. Missing/unavailable days are omitted
+instead of being invented as zero. The statistical threshold is:
 
 ```text
 EWMA baseline + max(EWMA baseline * 0.40, 5)
 ```
 
-This is a project-defined statistical finding, not a clinical deterioration
-assessment. There is one whole-day baseline; Day and Night do not have
-separate baselines. The current payload does not contain the number of
-individual cough sounds inside a bout, so the gateway does not infer that
-quantity or run a second bout-grouping state machine.
+There is one whole-day baseline; Day and Night do not have separate baselines.
+The current payload does not contain the number of individual cough sounds
+inside a bout, so the gateway does not infer that quantity or run a second
+bout-grouping state machine.
 
 ## Optional dashboard demo data
 
@@ -253,10 +308,11 @@ python -m unittest discover -s tests -v
 ```
 
 The tests cover legacy and extended timestamps, fixed-size bout-flag decoding
-and persistence, occurrence-time replay analytics, range-specific cough types,
-Day/Night grouping, EWMA warm-up/threshold/missing-day behavior, client
-isolation, two nodes using the same event counter, duplicate replay across
-reconnect, uint16 wrap, environment persistence and validation, old-database
-migration, concurrent socket clients, per-connection BLE notification routing,
-optional Time discovery/write, isolated write failure, and fleet-wide UTC-date
+and persistence, latest-event range anchoring despite delayed replay,
+occurrence-ordered Live Feed queries, range-specific cough types, Day/Night
+grouping, EWMA warm-up/threshold/missing-day behavior, client isolation, two
+nodes using the same event counter, duplicate replay across reconnect, uint16
+wrap, environment persistence and validation, old-database migration,
+concurrent socket clients, per-connection BLE notification routing, optional
+Time discovery/write, isolated write failure, and fleet-wide UTC-date
 resynchronization.

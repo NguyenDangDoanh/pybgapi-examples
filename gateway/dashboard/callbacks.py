@@ -86,7 +86,7 @@ def register(app: dash.Dash) -> None:
         Output(L.DAY_COUNT_ID, "children"),
         Output(L.NIGHT_COUNT_ID, "children"),
         Output(L.TODAY_COUNT_ID, "children"),
-        Output(L.LAST_RECEIVED_ID, "children"),
+        Output(L.LAST_EVENT_ID, "children"),
         Output(L.BASELINE_STATUS_ID, "children"),
         Output(L.LIVE_FEED_TABLE_ID, "data"),
         Input(L.POLL_INTERVAL_ID, "n_intervals"),
@@ -99,7 +99,7 @@ def register(app: dash.Dash) -> None:
             return empty, empty, "—", "—", "—", "—", _empty_baseline(), []
 
         stats = api_get(f"/clients/{client_id}/stats")
-        events = api_get(f"/clients/{client_id}/events?limit=50")
+        events = api_get(f"/clients/{client_id}/events?limit=50&order=event")
         if stats is None or events is None:
             return (dash.no_update,) * 8
 
@@ -112,12 +112,11 @@ def register(app: dash.Dash) -> None:
             str(day_night.get("day", 0)),
             str(day_night.get("night", 0)),
             str(today_count) if today_count is not None else "Unavailable",
-            _fmt_ts(stats.get("last_received_ts")),
+            _fmt_ts(stats.get("last_event_ts")),
             _baseline_content(stats.get("baseline", {})),
             [
                 {
                     "event_time": _fmt_ts(event.get("event_ts")),
-                    "received_time": _fmt_ts(event.get("received_ts")),
                     "event": _event_label(event),
                 }
                 for event in events
@@ -171,7 +170,11 @@ def _count_figure(stats: dict, range_mode: str, client_id: str) -> go.Figure:
         bargap=0.32,
         showlegend=False,
         dragmode=dragmode,
-        uirevision=f"{client_id}:{range_mode}",
+        # Preserve a manual pan while data is unchanged. A newly captured bout
+        # changes the anchor and naturally returns the viewport to latest data.
+        uirevision=(
+            f"{client_id}:{range_mode}:{stats.get('analysis_anchor_ts', '')}"
+        ),
         xaxis=xaxis_options,
     )
     fig.update_yaxes(fixedrange=True)

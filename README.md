@@ -71,6 +71,13 @@ See [the gateway timestamp and firmware contract](gateway/README.md#time-synchro
 for the UUID table, reconnect ordering, monotonic-clock requirements, offline
 buffer format, and counter semantics.
 
+The dashboard treats `event_ts` as the patient's timeline. Its 24-hour view
+ends at the selected patient's latest cough event, while delayed `received_ts`
+values remain audit-only and cannot move buffered coughs to reconnect time.
+Live Feed is also ordered by event time. See [current data flow and timestamp
+responsibilities](gateway/README.md#current-data-flow-and-timestamp-responsibilities)
+for the complete ingest, storage, API, analytics, and dashboard behavior.
+
 ## Generic Application Classes
 
 All example applications in this repo are based on the generic application classes. These classes
