@@ -222,8 +222,12 @@ count, and baseline. A late `received_ts` from offline replay never extends or
 shifts the patient window. When a patient or range changes, or a genuinely
 newer cough arrives, the graph returns naturally to the latest anchored view.
 
-The 24-hour chart groups events into local hourly bars. Horizontal dragging
-pans left into up to seven days of earlier hourly history. There is no separate
+The 24-hour chart groups events into local 10-minute bars; each bar is the
+total number of completed cough bouts whose `event_ts` falls in that exact
+10-minute interval. Its right edge and tick alignment use the configured local
+timezone, so a latest cough at 11:07 is shown in the 11:00-11:09 bucket rather
+than appearing seven hours earlier on a UTC axis. Horizontal dragging pans
+left into up to seven days of earlier 10-minute history. There is no separate
 "latest" button, no zoom control, and no line connecting bar peaks. Axis labels
 show local clock time; hover details contain the date and time.
 

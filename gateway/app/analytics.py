@@ -73,6 +73,16 @@ def _day_night_counts(events: list[dict]) -> dict[str, int]:
     return counts
 
 
+def _ten_minute_key(occurred: datetime) -> str:
+    """Return the local start timestamp of the event's 10-minute bucket."""
+    bucket = occurred.replace(
+        minute=(occurred.minute // 10) * 10,
+        second=0,
+        microsecond=0,
+    )
+    return bucket.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
 class Analytics:
     """Compute occurrence-time bout trends independently for each client."""
 
@@ -125,10 +135,12 @@ class Analytics:
         )
 
         hourly_map: defaultdict[str, int] = defaultdict(int)
+        ten_minute_map: defaultdict[str, int] = defaultdict(int)
         for event in events_24h:
             occurred = _parse_ts(event.get("event_ts"))
             if occurred is not None:
                 hourly_map[occurred.strftime("%Y-%m-%dT%H:00:00%z")] += 1
+                ten_minute_map[_ten_minute_key(occurred)] += 1
 
         daily_map: defaultdict[str, int] = defaultdict(int)
         for event in events_7d:
@@ -137,12 +149,14 @@ class Analytics:
                 daily_map[occurred.strftime("%Y-%m-%d")] += 1
 
         hourly_history_map: defaultdict[str, int] = defaultdict(int)
+        ten_minute_history_map: defaultdict[str, int] = defaultdict(int)
         for event in events_hour_history:
             occurred = _parse_ts(event.get("event_ts"))
             if occurred is not None:
                 hourly_history_map[
                     occurred.strftime("%Y-%m-%dT%H:00:00%z")
                 ] += 1
+                ten_minute_history_map[_ten_minute_key(occurred)] += 1
 
         all_events = self.dao.get_events(client_id=client_id)
         baseline = self.ewma_baseline_status(client_id, now=now_utc)
@@ -161,6 +175,10 @@ class Analytics:
                 {"ts": key, "count": value}
                 for key, value in sorted(hourly_map.items())
             ],
+            "per_10_minute": [
+                {"ts": key, "count": value}
+                for key, value in sorted(ten_minute_map.items())
+            ],
             "per_day": [
                 {"date": key, "count": value}
                 for key, value in sorted(daily_map.items())
@@ -168,6 +186,10 @@ class Analytics:
             "per_hour_history": [
                 {"ts": key, "count": value}
                 for key, value in sorted(hourly_history_map.items())
+            ],
+            "per_10_minute_history": [
+                {"ts": key, "count": value}
+                for key, value in sorted(ten_minute_history_map.items())
             ],
             "last_24h_count": len(events_24h),
             "last_7d_count": len(events_7d),

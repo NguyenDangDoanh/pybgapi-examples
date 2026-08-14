@@ -136,11 +136,18 @@ def _count_figure(stats: dict, range_mode: str, client_id: str) -> go.Figure:
             "fixedrange": True,
         }
         dragmode = False
+        bar_options = {}
     else:
-        points = stats.get("per_hour_history", stats.get("per_hour", []))
-        x = [point.get("ts") for point in points]
+        points = stats.get(
+            "per_10_minute_history",
+            stats.get("per_10_minute", []),
+        )
+        x = [_parse_datetime(point.get("ts")) for point in points]
         y = [point.get("count", 0) for point in points]
-        title = f"Cough-bout trend — last 24 hours ({stats.get('last_24h_count', 0)})"
+        title = (
+            "Cough-bout trend — 10-minute totals, last 24 hours "
+            f"({stats.get('last_24h_count', 0)})"
+        )
         anchor = _parse_datetime(stats.get("analysis_anchor_ts"))
         xaxis_options = {
             "type": "date",
@@ -153,7 +160,16 @@ def _count_figure(stats: dict, range_mode: str, client_id: str) -> go.Figure:
                 anchor - timedelta(hours=24),
                 anchor,
             ]
+            # Align ticks to the patient's local clock and always include the
+            # hour containing the newest cough at the right edge.
+            xaxis_options["tick0"] = anchor.replace(
+                minute=0, second=0, microsecond=0
+            )
+            xaxis_options["dtick"] = 3 * 60 * 60 * 1000
         dragmode = "pan"
+        # Plotly date widths are milliseconds. Offset zero makes each bar span
+        # from its bucket start through the following ten minutes.
+        bar_options = {"width": 10 * 60 * 1000, "offset": 0}
 
     fig = go.Figure()
     fig.add_bar(
@@ -163,7 +179,8 @@ def _count_figure(stats: dict, range_mode: str, client_id: str) -> go.Figure:
         marker_line_width=0,
         opacity=0.72,
         name="Bout count",
-        hovertemplate="%{x}: %{y} bouts<extra></extra>",
+        hovertemplate="%{x|%m-%d %H:%M}: %{y} bouts<extra></extra>",
+        **bar_options,
     )
     _apply_chrome(fig, title)
     fig.update_layout(
@@ -290,7 +307,13 @@ def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+        # Plotly serializes aware datetimes to UTC. Supplying a naive datetime
+        # after conversion keeps axis labels in the configured patient-facing
+        # timezone instead of shifting Vietnam time seven hours backwards.
+        return parsed.astimezone(DISPLAY_TIMEZONE).replace(tzinfo=None)
     except (TypeError, ValueError):
         return None
 

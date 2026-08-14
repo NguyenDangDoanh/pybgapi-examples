@@ -338,6 +338,22 @@ class AnalyticsTest(unittest.TestCase):
         )
         self.assertEqual({"day": 1, "night": 1}, stats["day_night_24h"])
 
+    def test_24h_trend_uses_ten_minute_buckets(self) -> None:
+        now = datetime(2026, 8, 14, 4, 7, tzinfo=timezone.utc)
+        # 11:01 and 11:07 local share one bucket; 10:59 is the prior bucket.
+        self._insert(now - timedelta(minutes=8), now - timedelta(minutes=8))
+        self._insert(now - timedelta(minutes=6), now - timedelta(minutes=6))
+        self._insert(now, now)
+
+        stats = self.analytics.get_client_stats(self.client_id, now=now)
+
+        self.assertEqual(
+            [1, 2],
+            [item["count"] for item in stats["per_10_minute"]],
+        )
+        self.assertTrue(stats["per_10_minute"][0]["ts"].endswith("+0700"))
+        self.assertIn("T11:00:00+0700", stats["per_10_minute"][1]["ts"])
+
     def test_default_24h_window_ends_at_latest_event_time(self) -> None:
         last_event = datetime(2026, 8, 5, 8, 0, tzinfo=timezone.utc)
         delayed_reconnect = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
