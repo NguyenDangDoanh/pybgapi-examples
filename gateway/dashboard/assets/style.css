@@ -207,6 +207,45 @@ body {
     font-size: 13px;
 }
 
+.finding-divider {
+    height: 1px;
+    margin: 18px 0;
+    background: #e1e0d9;
+}
+
+.treatment-heading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.treatment-heading .finding-copy {
+    margin-top: 3px;
+}
+
+.treatment-date-field {
+    min-width: 190px;
+}
+
+.treatment-date-field .DateInput,
+.treatment-date-field .DateInput_input {
+    width: 150px;
+}
+
+.treatment-date-field .DateInput_input {
+    height: 34px;
+    padding: 0 10px;
+    font-size: 13px;
+}
+
+.finding-treatment {
+    border-color: #b8c8dc;
+    background: #f5f8fb;
+}
+
 .finding-values {
     display: flex;
     gap: 36px;

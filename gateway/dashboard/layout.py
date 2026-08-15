@@ -14,6 +14,9 @@ LAST_EVENT_ID = "last-event"
 DAY_COUNT_ID = "day-count"
 NIGHT_COUNT_ID = "night-count"
 BASELINE_STATUS_ID = "baseline-status"
+TREATMENT_DATE_ID = "treatment-start-date"
+TREATMENT_RESPONSE_ID = "treatment-response"
+TREATMENT_REVISION_ID = "treatment-revision"
 
 POLL_INTERVAL_MS = 4000
 _FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
@@ -185,6 +188,44 @@ def _baseline_section() -> html.Div:
                     className="empty-state",
                 ),
             ),
+            html.Div(className="finding-divider"),
+            html.Div(
+                className="treatment-heading",
+                children=[
+                    html.Div(
+                        children=[
+                            html.Strong("Treatment response"),
+                            html.P(
+                                "Set one treatment start date for this patient.",
+                                className="finding-copy",
+                            ),
+                        ]
+                    ),
+                    html.Div(
+                        className="treatment-date-field",
+                        children=[
+                            html.Label(
+                                "Treatment start date",
+                                className="field-label",
+                            ),
+                            dcc.DatePickerSingle(
+                                id=TREATMENT_DATE_ID,
+                                display_format="YYYY-MM-DD",
+                                clearable=True,
+                                placeholder="YYYY-MM-DD",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+            html.Div(
+                id=TREATMENT_RESPONSE_ID,
+                children=html.P(
+                    "Select a patient and set a treatment start date.",
+                    className="empty-state",
+                ),
+            ),
+            dcc.Store(id=TREATMENT_REVISION_ID),
         ],
     )
 

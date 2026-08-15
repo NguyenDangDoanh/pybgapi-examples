@@ -42,6 +42,15 @@ def api_get(path: str):
         return None
 
 
+def api_put(path: str, payload: dict):
+    try:
+        response = requests.put(f"{API_BASE}{path}", json=payload, timeout=2)
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError):
+        return None
+
+
 def register(app: dash.Dash) -> None:
     @app.callback(
         Output(L.CLIENT_DROPDOWN_ID, "options"),
@@ -81,6 +90,34 @@ def register(app: dash.Dash) -> None:
         ]
 
     @app.callback(
+        Output(L.TREATMENT_DATE_ID, "date"),
+        Output(L.TREATMENT_DATE_ID, "disabled"),
+        Input(L.CLIENT_DROPDOWN_ID, "value"),
+    )
+    def load_treatment_date(client_id):
+        if not client_id:
+            return None, True
+        settings = api_get(f"/clients/{client_id}/treatment")
+        if settings is None:
+            return dash.no_update, False
+        return settings.get("treatment_start_date"), False
+
+    @app.callback(
+        Output(L.TREATMENT_REVISION_ID, "data"),
+        Input(L.TREATMENT_DATE_ID, "date"),
+        State(L.CLIENT_DROPDOWN_ID, "value"),
+        prevent_initial_call=True,
+    )
+    def save_treatment_date(treatment_start_date, client_id):
+        if not client_id:
+            return dash.no_update
+        saved = api_put(
+            f"/clients/{client_id}/treatment",
+            {"treatment_start_date": treatment_start_date},
+        )
+        return saved if saved is not None else dash.no_update
+
+    @app.callback(
         Output(L.COUNT_CHART_ID, "figure"),
         Output(L.TYPE_PIE_ID, "figure"),
         Output(L.DAY_COUNT_ID, "children"),
@@ -88,20 +125,32 @@ def register(app: dash.Dash) -> None:
         Output(L.TODAY_COUNT_ID, "children"),
         Output(L.LAST_EVENT_ID, "children"),
         Output(L.BASELINE_STATUS_ID, "children"),
+        Output(L.TREATMENT_RESPONSE_ID, "children"),
         Output(L.LIVE_FEED_TABLE_ID, "data"),
         Input(L.POLL_INTERVAL_ID, "n_intervals"),
         Input(L.CLIENT_DROPDOWN_ID, "value"),
         Input(L.RANGE_TOGGLE_ID, "value"),
+        Input(L.TREATMENT_REVISION_ID, "data"),
     )
-    def update_patient(_n, client_id, range_mode):
+    def update_patient(_n, client_id, range_mode, _treatment_revision):
         if not client_id:
             empty = _placeholder_figure("Select a patient above")
-            return empty, empty, "—", "—", "—", "—", _empty_baseline(), []
+            return (
+                empty,
+                empty,
+                "—",
+                "—",
+                "—",
+                "—",
+                _empty_baseline(),
+                _empty_treatment(),
+                [],
+            )
 
         stats = api_get(f"/clients/{client_id}/stats")
         events = api_get(f"/clients/{client_id}/events?limit=50&order=event")
         if stats is None or events is None:
-            return (dash.no_update,) * 8
+            return (dash.no_update,) * 9
 
         is_7d = range_mode == "7d"
         day_night = stats.get("day_night_7d" if is_7d else "day_night_24h", {})
@@ -114,6 +163,7 @@ def register(app: dash.Dash) -> None:
             str(today_count) if today_count is not None else "Unavailable",
             _fmt_ts(stats.get("last_event_ts")),
             _baseline_content(stats.get("baseline", {})),
+            _treatment_content(stats.get("treatment_response", {})),
             [
                 {
                     "event_time": _fmt_ts(event.get("event_ts")),
@@ -286,6 +336,71 @@ def _finding_value(label: str, value) -> html.Div:
 def _empty_baseline():
     return html.P(
         "Select a patient to evaluate the recent personal baseline.",
+        className="empty-state",
+    )
+
+
+def _treatment_content(status: dict):
+    if not status or not status.get("treatment_start_date"):
+        return _empty_treatment()
+    if not status.get("available"):
+        reason = status.get("reason")
+        if reason == "warmup":
+            message = (
+                f"{status.get('warmup_remaining', 7)} more completed full day(s) "
+                "are required for the cumulative baseline."
+            )
+        elif reason == "awaiting_completed_treatment_day":
+            message = "Waiting for the first completed day on or after treatment start."
+        elif reason == "no_completed_day":
+            message = "No completed full monitoring day is available yet."
+        else:
+            message = "No patient event data is available for this comparison."
+        return html.Div(
+            className="finding finding-warmup",
+            children=[
+                html.Strong("Treatment response is not available yet"),
+                html.P(message, className="finding-copy"),
+            ],
+        )
+
+    direction = status.get("direction")
+    title = {
+        "decreased": "Fewer cough bouts than the cumulative baseline",
+        "increased": "More cough bouts than the cumulative baseline",
+        "unchanged": "Cough bouts match the cumulative baseline",
+    }.get(direction, "Treatment response comparison")
+    change = status.get("change_percent")
+    change_text = f"{change:+.1f}%" if change is not None else "Unavailable"
+    return html.Div(
+        className="finding finding-treatment",
+        children=[
+            html.Strong(title),
+            html.Div(
+                className="finding-values",
+                children=[
+                    _finding_value(
+                        f"Cumulative baseline ({status.get('baseline_days', 0)} days)",
+                        f"{status['baseline']:.1f}",
+                    ),
+                    _finding_value(
+                        f"Current ({status.get('current_date', '—')})",
+                        status.get("current", "—"),
+                    ),
+                    _finding_value("Change", change_text),
+                ],
+            ),
+            html.P(
+                "The comparison is descriptive and does not attribute the change to treatment.",
+                className="finding-copy",
+            ),
+        ],
+    )
+
+
+def _empty_treatment():
+    return html.P(
+        "Select a patient and set a treatment start date.",
         className="empty-state",
     )
 

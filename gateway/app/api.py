@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from flask import Flask, abort, jsonify, request
 
 from .analytics import Analytics
@@ -50,6 +52,30 @@ def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
     @app.get("/api/clients/<client_id>/stats")
     def client_stats(client_id: str):
         return jsonify(analytics.get_client_stats(client_id))
+
+    @app.get("/api/clients/<client_id>/treatment")
+    def get_client_treatment(client_id: str):
+        return jsonify(dao.get_client_settings(client_id))
+
+    @app.put("/api/clients/<client_id>/treatment")
+    def set_client_treatment(client_id: str):
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or "treatment_start_date" not in data:
+            abort(400, description="Body must contain treatment_start_date")
+        treatment_start_date = data["treatment_start_date"]
+        if treatment_start_date is not None:
+            if not isinstance(treatment_start_date, str):
+                abort(400, description="treatment_start_date must be YYYY-MM-DD or null")
+            treatment_start_date = treatment_start_date.strip()
+            try:
+                treatment_start_date = date.fromisoformat(
+                    treatment_start_date
+                ).isoformat()
+            except ValueError:
+                abort(400, description="treatment_start_date must be YYYY-MM-DD or null")
+        return jsonify(
+            dao.set_treatment_start_date(client_id, treatment_start_date)
+        )
 
     @app.get("/api/devices")
     def list_devices():

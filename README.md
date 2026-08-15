@@ -78,6 +78,10 @@ Live Feed is also ordered by event time. See [current data flow and timestamp
 responsibilities](gateway/README.md#current-data-flow-and-timestamp-responsibilities)
 for the complete ingest, storage, API, analytics, and dashboard behavior.
 
+The dashboard also keeps the existing EWMA abnormal-day finding and provides a
+separate, optional cumulative [treatment-response comparison](gateway/README.md#treatment-response)
+using one start-date marker per patient.
+
 ## Generic Application Classes
 
 All example applications in this repo are based on the generic application classes. These classes

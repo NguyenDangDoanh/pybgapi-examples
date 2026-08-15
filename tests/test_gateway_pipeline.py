@@ -262,6 +262,13 @@ class MigrationTest(unittest.TestCase):
                 self.assertIn("stage2_valid", columns)
                 self.assertIn("prolonged", columns)
                 self.assertIn("duration_s", columns)
+                settings_tables = {
+                    item[0]
+                    for item in dao._get_conn().execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table'"
+                    )
+                }
+                self.assertIn("client_settings", settings_tables)
                 indexes = {
                     item[1]
                     for item in dao._get_conn().execute("PRAGMA index_list(cough_events)")
@@ -433,6 +440,94 @@ class AnalyticsTest(unittest.TestCase):
         self.assertTrue(other["available"])
         self.assertEqual(1.0, other["baseline"])
 
+    def test_treatment_date_is_stored_per_patient_and_can_be_cleared(self) -> None:
+        saved = self.dao.set_treatment_start_date(self.client_id, "2026-08-09")
+        self.assertEqual("2026-08-09", saved["treatment_start_date"])
+        self.assertIsNone(
+            self.dao.get_client_settings("another_patient")["treatment_start_date"]
+        )
+
+        cleared = self.dao.set_treatment_start_date(self.client_id, None)
+        self.assertIsNone(cleared["treatment_start_date"])
+
+    def test_treatment_response_uses_prior_expanding_full_days(self) -> None:
+        # UTC 05:00 is local noon. August 1 is excluded as the conservative
+        # partial first day; August 2-8 form the initial seven-day baseline.
+        self._insert(
+            datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc),
+            datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc),
+        )
+        for day_number, count in zip(range(2, 9), (10, 20, 30, 40, 50, 60, 70)):
+            occurred = datetime(
+                2026, 8, day_number, 5, 0, tzinfo=timezone.utc
+            )
+            for _ in range(count):
+                self._insert(occurred, occurred)
+        day_nine = datetime(2026, 8, 9, 5, 0, tzinfo=timezone.utc)
+        for _ in range(80):
+            self._insert(day_nine, day_nine)
+
+        initial = self.analytics.treatment_response_status(
+            self.client_id,
+            "2026-08-09",
+            now=datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc),
+        )
+        self.assertTrue(initial["available"])
+        self.assertEqual(7, initial["baseline_days"])
+        self.assertEqual(40.0, initial["baseline"])
+        self.assertEqual(80, initial["current"])
+        self.assertEqual(100.0, initial["change_percent"])
+        self.assertEqual("increased", initial["direction"])
+
+        day_ten = datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc)
+        for _ in range(20):
+            self._insert(day_ten, day_ten)
+        expanded = self.analytics.treatment_response_status(
+            self.client_id,
+            "2026-08-09",
+            now=datetime(2026, 8, 11, 5, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(8, expanded["baseline_days"])
+        self.assertEqual(45.0, expanded["baseline"])
+        self.assertEqual(20, expanded["current"])
+        self.assertEqual(-55.6, expanded["change_percent"])
+        self.assertEqual("decreased", expanded["direction"])
+
+    def test_treatment_response_counts_completed_zero_days(self) -> None:
+        first = datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc)
+        self._insert(first, first)
+        day_two = datetime(2026, 8, 2, 5, 0, tzinfo=timezone.utc)
+        for _ in range(7):
+            self._insert(day_two, day_two)
+
+        status = self.analytics.treatment_response_status(
+            self.client_id,
+            "2026-08-09",
+            now=datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc),
+        )
+        self.assertTrue(status["available"])
+        self.assertEqual(7, status["baseline_days"])
+        self.assertEqual(1.0, status["baseline"])
+        self.assertEqual(0, status["current"])
+        self.assertEqual(-100.0, status["change_percent"])
+
+    def test_treatment_response_keeps_separate_seven_day_warmup(self) -> None:
+        for day_number in range(1, 6):
+            occurred = datetime(
+                2026, 8, day_number, 5, 0, tzinfo=timezone.utc
+            )
+            self._insert(occurred, occurred)
+
+        status = self.analytics.treatment_response_status(
+            self.client_id,
+            "2026-08-04",
+            now=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
+        )
+        self.assertFalse(status["available"])
+        self.assertEqual("warmup", status["reason"])
+        self.assertEqual(3, status["baseline_days"])
+        self.assertEqual(4, status["warmup_remaining"])
+
 
 class DemoDataTest(unittest.TestCase):
     def test_demo_seed_exercises_dashboard_states_without_duplication(self) -> None:
@@ -447,16 +542,21 @@ class DemoDataTest(unittest.TestCase):
                 warmup = analytics.get_client_stats(WARMUP_CLIENT, now=now)
 
                 self.assertTrue(first["created"])
-                self.assertEqual(111, first["events"])
+                self.assertEqual(123, first["events"])
                 self.assertEqual(22, above["today_count"])
                 self.assertTrue(above["baseline"]["available"])
                 self.assertTrue(above["baseline"]["above_baseline"])
+                self.assertTrue(above["treatment_response"]["available"])
+                self.assertEqual(
+                    "decreased", above["treatment_response"]["direction"]
+                )
                 self.assertGreater(above["day_night_24h"]["day"], 0)
                 self.assertGreater(above["day_night_24h"]["night"], 0)
                 self.assertTrue(all(above["by_type_24h"].values()))
                 self.assertEqual(4, warmup["today_count"])
                 self.assertFalse(warmup["baseline"]["available"])
                 self.assertEqual(4, warmup["baseline"]["warmup_remaining"])
+                self.assertFalse(warmup["treatment_response"]["available"])
 
                 devices = {item["name"]: item for item in dao.get_devices()}
                 self.assertEqual("online", devices["Demo Sensor 01"]["status"])

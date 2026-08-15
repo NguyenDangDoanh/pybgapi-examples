@@ -45,5 +45,11 @@ CREATE TABLE IF NOT EXISTS environment_readings (
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
 );
 
+CREATE TABLE IF NOT EXISTS client_settings (
+    client_id            TEXT PRIMARY KEY,
+    treatment_start_date TEXT,
+    updated_at           TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS ix_cough_client_event
     ON cough_events(client_id, event_ts DESC);

@@ -332,6 +332,43 @@ class Dao:
     def get_client_summaries(self) -> list[dict[str, Any]]:
         return self.list_clients()
 
+    def get_client_settings(self, client_id: str) -> dict[str, Any]:
+        """Return persisted per-patient dashboard settings."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT * FROM client_settings WHERE client_id = ?",
+                (client_id,),
+            ).fetchone()
+        if row is None:
+            return {
+                "client_id": client_id,
+                "treatment_start_date": None,
+                "updated_at": None,
+            }
+        return dict(row)
+
+    def set_treatment_start_date(
+        self, client_id: str, treatment_start_date: str | None
+    ) -> dict[str, Any]:
+        """Persist or clear the single treatment marker for one patient."""
+        updated_at = datetime.now(timezone.utc).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        with self._lock:
+            self._get_conn().execute(
+                """
+                INSERT INTO client_settings (
+                    client_id, treatment_start_date, updated_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET
+                    treatment_start_date = excluded.treatment_start_date,
+                    updated_at = excluded.updated_at
+                """,
+                (client_id, treatment_start_date, updated_at),
+            )
+            self._get_conn().commit()
+        return self.get_client_settings(client_id)
+
     def get_hourly_counts(self, client_id: str) -> list[dict[str, Any]]:
         start_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         sql = """

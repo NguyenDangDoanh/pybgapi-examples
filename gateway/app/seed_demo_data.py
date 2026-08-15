@@ -56,6 +56,10 @@ def _delete_existing_demo(dao: Dao) -> None:
         connection.execute(
             "DELETE FROM environment_readings WHERE message_id LIKE ?", (pattern,)
         )
+        connection.execute(
+            "DELETE FROM client_settings WHERE client_id IN (?, ?)",
+            (ABOVE_CLIENT, WARMUP_CLIENT),
+        )
         connection.commit()
 
 
@@ -161,9 +165,11 @@ def seed_demo_data(
         last_seen=warmup_last_seen,
     )
 
-    above_history = [8, 9, 10, 9, 11, 10, 10]
+    # Nine completed dates provide one conservative partial first day, seven
+    # expanding-baseline days, and one post-treatment comparison day.
+    above_history = [8, 9, 10, 9, 11, 10, 10, 7, 5]
     above_schedule = [
-        (local_now.date() - timedelta(days=7 - index), count)
+        (local_now.date() - timedelta(days=9 - index), count)
         for index, count in enumerate(above_history)
     ]
     above_schedule.append((local_now.date(), 22))
@@ -181,6 +187,11 @@ def seed_demo_data(
     warmup_count = _insert_bouts(
         dao, WARMUP_CLIENT, WARMUP_DEVICE, warmup_schedule, local_now
     )
+    dao.set_treatment_start_date(
+        ABOVE_CLIENT,
+        (local_now.date() - timedelta(days=1)).isoformat(),
+    )
+    dao.set_treatment_start_date(WARMUP_CLIENT, local_now.date().isoformat())
 
     dao.insert_environment(
         {

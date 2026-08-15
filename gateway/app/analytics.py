@@ -160,6 +160,12 @@ class Analytics:
 
         all_events = self.dao.get_events(client_id=client_id)
         baseline = self.ewma_baseline_status(client_id, now=now_utc)
+        client_settings = self.dao.get_client_settings(client_id)
+        treatment_response = self.treatment_response_status(
+            client_id,
+            treatment_start_date=client_settings.get("treatment_start_date"),
+            now=now_utc,
+        )
 
         by_type_24h = _type_counts(events_24h)
         by_type_7d = _type_counts(events_7d)
@@ -199,11 +205,136 @@ class Analytics:
             "day_night_24h": day_night_24h,
             "day_night_7d": day_night_7d,
             "baseline": baseline,
+            "treatment_response": treatment_response,
             "last_event_ts": last_event_ts,
             # Transport receipt remains available to API consumers for audit
             # and reconnect diagnostics, but does not drive patient analytics.
             "last_received_ts": last_received_ts,
             "analysis_anchor_ts": _iso_utc(now_utc),
+        }
+
+    def treatment_response_status(
+        self,
+        client_id: str,
+        treatment_start_date: str | None,
+        warmup_days: int = 7,
+        now: datetime | None = None,
+    ) -> dict:
+        """Compare the latest completed treatment day with prior full days.
+
+        The first local calendar day containing data is conservatively treated
+        as partial. Every later completed calendar day is included, including
+        zero-bout days under the project's continuous-monitoring assumption.
+        The current day is never compared with a baseline that contains itself;
+        once completed, it joins the expanding baseline for the following day.
+        """
+        if warmup_days <= 0:
+            raise ValueError("warmup_days must be positive")
+
+        base = {
+            "client_id": client_id,
+            "treatment_start_date": treatment_start_date,
+            "warmup_days": warmup_days,
+            "available": False,
+            "baseline": None,
+            "current": None,
+            "current_date": None,
+            "change_percent": None,
+            "direction": None,
+            "baseline_days": 0,
+            "warmup_remaining": warmup_days,
+        }
+        if not treatment_start_date:
+            return {**base, "reason": "treatment_not_set"}
+        try:
+            treatment_day = date.fromisoformat(str(treatment_start_date))
+        except (TypeError, ValueError):
+            return {**base, "reason": "invalid_treatment_date"}
+
+        now_utc = _as_utc(now)
+        completed_through = (
+            now_utc.astimezone(DISPLAY_TIMEZONE).date() - timedelta(days=1)
+        )
+        events = self.dao.get_events_by_occurrence(
+            client_id=client_id,
+            end_time=_iso_utc(now_utc),
+        )
+        dated_events: list[tuple[date, dict]] = []
+        for event in events:
+            occurred = _parse_ts(event.get("event_ts"))
+            if occurred is not None:
+                dated_events.append((occurred.date(), event))
+        if not dated_events:
+            return {**base, "reason": "no_data"}
+
+        # We cannot prove that monitoring covered the part of the first day
+        # before the first event, so full-day accounting begins the next day.
+        first_full_day = min(day for day, _event in dated_events) + timedelta(days=1)
+        if first_full_day > completed_through:
+            return {**base, "reason": "no_completed_day"}
+
+        counts: defaultdict[date, int] = defaultdict(int)
+        for day, _event in dated_events:
+            if first_full_day <= day <= completed_through:
+                counts[day] += 1
+
+        completed_days: list[dict] = []
+        cursor = first_full_day
+        while cursor <= completed_through:
+            completed_days.append({"date": cursor, "count": counts[cursor]})
+            cursor += timedelta(days=1)
+
+        treatment_days = [
+            item for item in completed_days if item["date"] >= treatment_day
+        ]
+        if not treatment_days:
+            return {
+                **base,
+                "completed_days": len(completed_days),
+                "reason": "awaiting_completed_treatment_day",
+            }
+
+        current_day = treatment_days[-1]
+        baseline_days = [
+            item for item in completed_days if item["date"] < current_day["date"]
+        ]
+        remaining = max(warmup_days - len(baseline_days), 0)
+        pending = {
+            **base,
+            "current": int(current_day["count"]),
+            "current_date": current_day["date"].isoformat(),
+            "baseline_days": len(baseline_days),
+            "completed_days": len(completed_days),
+            "warmup_remaining": remaining,
+        }
+        if remaining:
+            return {**pending, "reason": "warmup"}
+
+        cumulative_baseline = sum(
+            int(item["count"]) for item in baseline_days
+        ) / len(baseline_days)
+        current_count = int(current_day["count"])
+        change_percent = (
+            ((current_count - cumulative_baseline) / cumulative_baseline) * 100.0
+            if cumulative_baseline > 0
+            else None
+        )
+        if current_count < cumulative_baseline:
+            direction = "decreased"
+        elif current_count > cumulative_baseline:
+            direction = "increased"
+        else:
+            direction = "unchanged"
+
+        return {
+            **pending,
+            "available": True,
+            "baseline": round(cumulative_baseline, 2),
+            "change_percent": (
+                round(change_percent, 1) if change_percent is not None else None
+            ),
+            "direction": direction,
+            "reason": None if change_percent is not None else "zero_baseline",
         }
 
     def hourly_counts(

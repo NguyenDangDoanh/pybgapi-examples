@@ -246,8 +246,9 @@ the dashboard requests `?order=event` for occurrence order.
 
 The former `Suggestions` engine and API field have been removed. Its two
 automatic messages duplicated the baseline presentation or compared adjacent
-24-hour transport windows without adding patient context. Baseline status is
-now the only automatic statistical finding shown.
+24-hour transport windows without adding patient context. The remaining
+statistical area contains the EWMA finding and the separate treatment-response
+summary described below.
 
 The dashboard client/device selectors suppress legacy `client_test_alert`,
 `device_test_alert`, and unassigned rows. This presentation filter does not
@@ -269,6 +270,54 @@ The current payload does not contain the number of individual cough sounds
 inside a bout, so the gateway does not infer that quantity or run a second
 bout-grouping state machine.
 
+## Treatment response
+
+The treatment marker is intentionally small: each patient can have one optional
+`treatment_start_date` (`YYYY-MM-DD`). It is stored independently in the
+`client_settings` table and can be set or cleared directly from the existing
+**Statistical findings** card. No medication name, dose, questionnaire, or
+additional treatment episode is collected.
+
+Treatment response does **not** replace the EWMA finding. The two calculations
+have different jobs:
+
+- **EWMA finding**: keeps the existing short-term check for whether today's
+  observed bout count is above the patient's recent normal range;
+- **Treatment response**: compares the most recent completed treatment day with
+  an expanding arithmetic-mean baseline.
+
+For treatment response, the first local calendar date containing an event is
+treated as partial and excluded. Starting with the following date, every
+completed local calendar day is included. Because this project assumes the
+device is monitoring continuously, a completed day with no recorded bout is a
+zero-bout day. At least seven full prior days are required.
+
+The latest completed day on or after the treatment marker is `Current`. Its
+baseline contains every completed full day before that current day. The current
+day is deliberately excluded from its own comparison; after it completes, it
+joins the cumulative baseline used for the following day. Therefore the
+baseline expands rather than sliding or remaining fixed:
+
+```text
+Day 8 comparison baseline = mean(Days 1..7)
+Day 9 comparison baseline = mean(Days 1..8)
+Change (%) = (Current - cumulative baseline) / cumulative baseline * 100
+```
+
+A negative percentage means fewer bouts and a positive percentage means more
+bouts than the cumulative baseline. The dashboard reports only this objective
+direction and does not label treatment effective or ineffective. Partial today
+is not used as the treatment-response `Current` value.
+
+The treatment setting API is:
+
+```text
+GET /api/clients/<client_id>/treatment
+PUT /api/clients/<client_id>/treatment
+Body: {"treatment_start_date": "2026-08-09"}
+Clear: {"treatment_start_date": null}
+```
+
 ## Optional dashboard demo data
 
 Demo data is never created during normal gateway startup. To exercise every
@@ -282,9 +331,10 @@ Use `--db /path/to/cough_monitor.db` when `GATEWAY_DB_PATH` is not set and the
 database is elsewhere. The command creates only records whose message IDs use
 the reserved `demo-dashboard-` prefix plus these patients/devices:
 
-- `demo_patient_above_baseline` / `Demo Sensor 01`: seven completed observed
-  days, an above-baseline current day, all cough types, Day/Night bouts,
-  prolonged labels, a delayed-replay example, and environment readings;
+- `demo_patient_above_baseline` / `Demo Sensor 01`: enough completed days for
+  both EWMA and a decreasing treatment-response example, an above-EWMA current
+  day, all cough types, Day/Night bouts, prolonged labels, a delayed-replay
+  example, and environment readings;
 - `demo_patient_warmup` / `Demo Sensor 02`: three completed observed days so
   the baseline remains in warm-up, plus offline device status and environment
   readings.
