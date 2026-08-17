@@ -92,12 +92,23 @@ body {
     font-size: 15px;
 }
 
+.header-kpi {
+    margin-left: auto;
+}
+
+.header-kpi strong {
+    display: block;
+    font-size: 26px;
+    line-height: 1;
+}
+
 .monitoring-header {
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
     gap: 20px;
     flex-wrap: wrap;
+    justify-content: flex-end;
 }
 
 .primary-kpi {
@@ -159,6 +170,7 @@ body {
     border: 1px solid #e1e0d9;
     border-radius: 8px;
     background: #f9f9f7;
+    cursor: help;
 }
 
 .period-stat span {
@@ -177,6 +189,76 @@ body {
 
 .baseline-card {
     border-left: 4px solid #c3c2b7;
+}
+
+.week-finding {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.week-current {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 16px;
+    border: 1px solid #c8d2dd;
+    border-radius: 8px;
+    background: #f4f7fa;
+}
+
+.week-current span {
+    color: #52514e;
+    font-size: 13px;
+}
+
+.week-latest {
+    display: grid;
+    grid-template-columns: 1fr auto auto auto;
+    align-items: center;
+    gap: 18px;
+    padding: 12px 16px;
+    border-top: 1px solid #e1e0d9;
+}
+
+.week-latest .field-label {
+    margin: 0;
+}
+
+.week-number,
+.week-level,
+.week-change {
+    white-space: nowrap;
+}
+
+.week-change {
+    cursor: help;
+    color: #2a78d6;
+}
+
+.live-feed-heading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.live-feed-heading h2 {
+    margin-bottom: 0;
+}
+
+.live-feed-filter .DateInput,
+.live-feed-filter .DateInput_input {
+    width: 150px;
+}
+
+.live-feed-filter .DateInput_input {
+    height: 34px;
+    padding: 0 10px;
+    font-size: 13px;
 }
 
 .finding {
@@ -291,6 +373,14 @@ body {
 
     .last-received-block {
         text-align: left;
+    }
+
+    .header-kpi {
+        margin-left: 0;
+    }
+
+    .week-latest {
+        grid-template-columns: 1fr 1fr;
     }
 
     .client-dropdown {

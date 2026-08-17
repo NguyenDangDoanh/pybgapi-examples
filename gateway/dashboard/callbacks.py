@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import dash
@@ -27,7 +28,7 @@ _INK = "#0b0b0b"
 _INK_2 = "#52514e"
 _MUTED = "#898781"
 _GRID = "#e1e0d9"
-_BASELINE = "#c3c2b7"
+_BASELINE = "#b46b2a"
 _SERIES = "#2a78d6"
 _TYPE_COLORS = {"dry": "#2a78d6", "wet": "#1baf7a", "unknown": "#898781"}
 _FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
@@ -36,15 +37,6 @@ _FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 def api_get(path: str):
     try:
         response = requests.get(f"{API_BASE}{path}", timeout=2)
-        response.raise_for_status()
-        return response.json()
-    except (requests.RequestException, ValueError):
-        return None
-
-
-def api_put(path: str, payload: dict):
-    try:
-        response = requests.put(f"{API_BASE}{path}", json=payload, timeout=2)
         response.raise_for_status()
         return response.json()
     except (requests.RequestException, ValueError):
@@ -90,49 +82,22 @@ def register(app: dash.Dash) -> None:
         ]
 
     @app.callback(
-        Output(L.TREATMENT_DATE_ID, "date"),
-        Output(L.TREATMENT_DATE_ID, "disabled"),
-        Input(L.CLIENT_DROPDOWN_ID, "value"),
-    )
-    def load_treatment_date(client_id):
-        if not client_id:
-            return None, True
-        settings = api_get(f"/clients/{client_id}/treatment")
-        if settings is None:
-            return dash.no_update, False
-        return settings.get("treatment_start_date"), False
-
-    @app.callback(
-        Output(L.TREATMENT_REVISION_ID, "data"),
-        Input(L.TREATMENT_DATE_ID, "date"),
-        State(L.CLIENT_DROPDOWN_ID, "value"),
-        prevent_initial_call=True,
-    )
-    def save_treatment_date(treatment_start_date, client_id):
-        if not client_id:
-            return dash.no_update
-        saved = api_put(
-            f"/clients/{client_id}/treatment",
-            {"treatment_start_date": treatment_start_date},
-        )
-        return saved if saved is not None else dash.no_update
-
-    @app.callback(
         Output(L.COUNT_CHART_ID, "figure"),
         Output(L.TYPE_PIE_ID, "figure"),
         Output(L.DAY_COUNT_ID, "children"),
         Output(L.NIGHT_COUNT_ID, "children"),
+        Output(L.DAY_CARD_ID, "title"),
+        Output(L.NIGHT_CARD_ID, "title"),
         Output(L.TODAY_COUNT_ID, "children"),
         Output(L.LAST_EVENT_ID, "children"),
-        Output(L.BASELINE_STATUS_ID, "children"),
-        Output(L.TREATMENT_RESPONSE_ID, "children"),
+        Output(L.STATISTICAL_FINDING_ID, "children"),
         Output(L.LIVE_FEED_TABLE_ID, "data"),
         Input(L.POLL_INTERVAL_ID, "n_intervals"),
         Input(L.CLIENT_DROPDOWN_ID, "value"),
         Input(L.RANGE_TOGGLE_ID, "value"),
-        Input(L.TREATMENT_REVISION_ID, "data"),
+        Input(L.LIVE_FEED_DATE_ID, "date"),
     )
-    def update_patient(_n, client_id, range_mode, _treatment_revision):
+    def update_patient(_n, client_id, range_mode, event_date):
         if not client_id:
             empty = _placeholder_figure("Select a patient above")
             return (
@@ -140,30 +105,33 @@ def register(app: dash.Dash) -> None:
                 empty,
                 "—",
                 "—",
+                "Trend unavailable",
+                "Trend unavailable",
                 "—",
                 "—",
-                _empty_baseline(),
-                _empty_treatment(),
+                _empty_finding(),
                 [],
             )
 
-        stats = api_get(f"/clients/{client_id}/stats")
-        events = api_get(f"/clients/{client_id}/events?limit=50&order=event")
+        stats = api_get(f"/clients/{quote(str(client_id), safe='')}/stats")
+        events = api_get(_event_query(str(client_id), event_date))
         if stats is None or events is None:
-            return (dash.no_update,) * 9
+            return (dash.no_update,) * 10
 
         is_7d = range_mode == "7d"
         day_night = stats.get("day_night_7d" if is_7d else "day_night_24h", {})
+        trends = stats.get("day_night_trends", {})
         today_count = stats.get("today_count")
         return (
-            _count_figure(stats, range_mode, client_id),
+            _count_figure(stats, range_mode, str(client_id)),
             _type_figure(stats, range_mode),
             str(day_night.get("day", 0)),
             str(day_night.get("night", 0)),
+            _trend_title("Day", trends.get("day", {})),
+            _trend_title("Night", trends.get("night", {})),
             str(today_count) if today_count is not None else "Unavailable",
             _fmt_ts(stats.get("last_event_ts")),
-            _baseline_content(stats.get("baseline", {})),
-            _treatment_content(stats.get("treatment_response", {})),
+            _weekly_finding_content(stats.get("weekly_finding", {})),
             [
                 {
                     "event_time": _fmt_ts(event.get("event_ts")),
@@ -174,77 +142,112 @@ def register(app: dash.Dash) -> None:
         )
 
 
+def _event_query(client_id: str, event_date: str | None) -> str:
+    path = f"/clients/{quote(client_id, safe='')}/events"
+    params = {"order": "event"}
+    if event_date:
+        try:
+            local_day = date.fromisoformat(str(event_date))
+            start = datetime.combine(local_day, time.min, DISPLAY_TIMEZONE)
+            end = start + timedelta(days=1) - timedelta(microseconds=1)
+            params["from"] = _utc_iso(start)
+            params["to"] = _utc_iso(end)
+        except (TypeError, ValueError):
+            pass
+    return f"{path}?{urlencode(params)}"
+
+
 def _count_figure(stats: dict, range_mode: str, client_id: str) -> go.Figure:
+    fig = go.Figure()
     if range_mode == "7d":
         points = stats.get("per_day", [])
         x = [point.get("date") for point in points]
         y = [point.get("count", 0) for point in points]
-        title = f"Cough-bout trend — last 7 days ({stats.get('last_7d_count', 0)})"
-        xaxis_options = {
-            "type": "date",
-            "tickformat": "%m-%d",
-            "fixedrange": True,
-        }
-        dragmode = False
-        bar_options = {}
-    else:
-        points = stats.get(
-            "per_10_minute_history",
-            stats.get("per_10_minute", []),
+        fig.add_bar(
+            x=x,
+            y=y,
+            marker_color=_SERIES,
+            marker_line_width=0,
+            opacity=0.76,
+            name="Daily bouts",
+            hovertemplate="%{x|%m-%d}<br>%{y} bouts<extra></extra>",
         )
+        baseline = stats.get("baseline", {}).get("baseline")
+        if baseline is not None and x:
+            anchor = _parse_datetime(stats.get("analysis_anchor_ts"))
+            line_x = (
+                [
+                    (anchor - timedelta(days=6)).date().isoformat(),
+                    anchor.date().isoformat(),
+                ]
+                if anchor is not None
+                else [x[0], x[-1]]
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=line_x,
+                    y=[baseline, baseline],
+                    mode="lines",
+                    line={"color": _BASELINE, "width": 2.2},
+                    name="Personal EWMA",
+                    hovertemplate="Personal EWMA: %{y:.1f} bouts/day<extra></extra>",
+                )
+            )
+        _apply_chrome(fig, "Cough bouts — last 7 days")
+        fig.update_layout(
+            bargap=0.35,
+            showlegend=baseline is not None,
+            legend={"orientation": "h", "y": -0.18},
+            dragmode=False,
+            xaxis={"type": "date", "tickformat": "%m-%d", "fixedrange": True},
+            uirevision=f"{client_id}:7d:{stats.get('analysis_anchor_ts', '')}",
+        )
+    else:
+        points = stats.get("per_30_minute_history", stats.get("per_30_minute", []))
         x = [_parse_datetime(point.get("ts")) for point in points]
-        y = [point.get("count", 0) for point in points]
-        title = (
-            "Cough-bout trend — 10-minute totals, last 24 hours "
-            f"({stats.get('last_24h_count', 0)})"
+        labels = []
+        for parsed in x:
+            labels.append(
+                f"{parsed:%H:%M}–{parsed + timedelta(minutes=30):%H:%M}"
+                if parsed is not None
+                else "30-minute interval"
+            )
+        fig.add_bar(
+            x=x,
+            y=[point.get("count", 0) for point in points],
+            customdata=labels,
+            marker_color=_SERIES,
+            marker_line_width=0,
+            opacity=0.76,
+            name="Bout count",
+            width=30 * 60 * 1000,
+            offset=0,
+            hovertemplate="%{customdata}<br>%{y} bouts<extra></extra>",
         )
         anchor = _parse_datetime(stats.get("analysis_anchor_ts"))
-        xaxis_options = {
+        xaxis = {
             "type": "date",
             "tickformat": "%H:%M",
-            "hoverformat": "%m-%d %H:%M",
             "fixedrange": False,
         }
         if anchor is not None:
-            xaxis_options["range"] = [
-                anchor - timedelta(hours=24),
-                anchor,
-            ]
-            # Align ticks to the patient's local clock and always include the
-            # hour containing the newest cough at the right edge.
-            xaxis_options["tick0"] = anchor.replace(
-                minute=0, second=0, microsecond=0
+            xaxis.update(
+                {
+                    "range": [anchor - timedelta(hours=24), anchor],
+                    "tick0": anchor.replace(minute=0, second=0, microsecond=0),
+                    "dtick": 3 * 60 * 60 * 1000,
+                }
             )
-            xaxis_options["dtick"] = 3 * 60 * 60 * 1000
-        dragmode = "pan"
-        # Plotly date widths are milliseconds. Offset zero makes each bar span
-        # from its bucket start through the following ten minutes.
-        bar_options = {"width": 10 * 60 * 1000, "offset": 0}
+        _apply_chrome(fig, "Cough bouts — last 24 hours")
+        fig.update_layout(
+            bargap=0.14,
+            showlegend=False,
+            dragmode="pan",
+            xaxis=xaxis,
+            uirevision=f"{client_id}:24h:{stats.get('analysis_anchor_ts', '')}",
+        )
 
-    fig = go.Figure()
-    fig.add_bar(
-        x=x,
-        y=y,
-        marker_color=_SERIES,
-        marker_line_width=0,
-        opacity=0.72,
-        name="Bout count",
-        hovertemplate="%{x|%m-%d %H:%M}: %{y} bouts<extra></extra>",
-        **bar_options,
-    )
-    _apply_chrome(fig, title)
-    fig.update_layout(
-        bargap=0.32,
-        showlegend=False,
-        dragmode=dragmode,
-        # Preserve a manual pan while data is unchanged. A newly captured bout
-        # changes the anchor and naturally returns the viewport to latest data.
-        uirevision=(
-            f"{client_id}:{range_mode}:{stats.get('analysis_anchor_ts', '')}"
-        ),
-        xaxis=xaxis_options,
-    )
-    fig.update_yaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=True, tickmode="linear", dtick=1, rangemode="tozero")
     return fig
 
 
@@ -254,7 +257,6 @@ def _type_figure(stats: dict, range_mode: str) -> go.Figure:
     names = [name for name in ("wet", "dry", "unknown") if by_type.get(name)]
     if not names:
         return _placeholder_figure("No cough-bout data in this range")
-
     fig = go.Figure(
         data=[
             go.Pie(
@@ -275,134 +277,71 @@ def _type_figure(stats: dict, range_mode: str) -> go.Figure:
     return fig
 
 
-def _baseline_content(status: dict):
-    if not status:
-        return _empty_baseline()
-    if not status.get("available"):
-        remaining = status.get("warmup_remaining", 7)
-        return html.Div(
-            className="finding finding-warmup",
-            children=[
-                html.Strong("Establishing recent personal baseline"),
-                html.P(
-                    f"{remaining} more completed observed day(s) required.",
-                    className="finding-copy",
-                ),
-            ],
+def _weekly_finding_content(status: dict):
+    if not status or not status.get("start_date"):
+        return _empty_finding()
+    active_week = int(status.get("active_week", 1))
+    completed = int(status.get("completed_days_in_week", 0))
+    if active_week == 1:
+        heading = "PERSONAL BASELINE FORMATION"
+        progress = f"{completed} / 7 completed days"
+    else:
+        heading = f"TREATMENT WEEK {active_week}"
+        progress = f"Calculating · {completed} / 7 completed days"
+
+    children = [
+        html.Div(
+            className="week-current",
+            children=[html.Strong(heading), html.Span(progress)],
         )
-    if not status.get("current_available"):
-        return html.Div(
-            className="finding finding-neutral",
-            children=[
-                html.Strong("Today's bout count is unavailable"),
-                html.P(
-                    f"EWMA baseline: {status['baseline']:.1f} bouts/day",
-                    className="finding-copy",
-                ),
-            ],
-        )
-
-    change = status.get("change_percent")
-    change_text = f"{change:+.1f}%" if change is not None else "—"
-    title = (
-        "Above recent personal bout baseline"
-        if status.get("above_baseline")
-        else "Within recent personal bout baseline"
-    )
-    return html.Div(
-        className=(
-            "finding finding-active"
-            if status.get("above_baseline")
-            else "finding finding-stable"
-        ),
-        children=[
-            html.Strong(title),
-            html.Div(
-                className="finding-values",
-                children=[
-                    _finding_value("Current", status.get("today_count")),
-                    _finding_value("EWMA baseline", f"{status['baseline']:.1f}"),
-                    _finding_value("Change", change_text),
-                ],
-            ),
-        ],
-    )
-
-
-def _finding_value(label: str, value) -> html.Div:
-    return html.Div(children=[html.Span(label), html.Strong(str(value))])
-
-
-def _empty_baseline():
-    return html.P(
-        "Select a patient to evaluate the recent personal baseline.",
-        className="empty-state",
-    )
-
-
-def _treatment_content(status: dict):
-    if not status or not status.get("treatment_start_date"):
-        return _empty_treatment()
-    if not status.get("available"):
-        reason = status.get("reason")
-        if reason == "warmup":
-            message = (
-                f"{status.get('warmup_remaining', 7)} more completed full day(s) "
-                "are required for the cumulative baseline."
-            )
-        elif reason == "awaiting_completed_treatment_day":
-            message = "Waiting for the first completed day on or after treatment start."
-        elif reason == "no_completed_day":
-            message = "No completed full monitoring day is available yet."
+    ]
+    latest = status.get("latest_completed_period")
+    if latest:
+        change = latest.get("change_percent")
+        if change is None:
+            change_text = "N/A"
         else:
-            message = "No patient event data is available for this comparison."
-        return html.Div(
-            className="finding finding-warmup",
-            children=[
-                html.Strong("Treatment response is not available yet"),
-                html.P(message, className="finding-copy"),
-            ],
+            arrow = "↑" if change > 0 else "↓" if change < 0 else "→"
+            change_text = f"{arrow}{abs(change):.1f}%"
+        reference = latest.get("week_reference_snapshot")
+        hover = (
+            f"Start-of-week Personal EWMA: {reference:.1f} bouts/day"
+            if reference is not None
+            else "Start-of-week Personal EWMA was zero; percentage unavailable"
         )
-
-    direction = status.get("direction")
-    title = {
-        "decreased": "Fewer cough bouts than the cumulative baseline",
-        "increased": "More cough bouts than the cumulative baseline",
-        "unchanged": "Cough bouts match the cumulative baseline",
-    }.get(direction, "Treatment response comparison")
-    change = status.get("change_percent")
-    change_text = f"{change:+.1f}%" if change is not None else "Unavailable"
-    return html.Div(
-        className="finding finding-treatment",
-        children=[
-            html.Strong(title),
+        children.append(
             html.Div(
-                className="finding-values",
+                className="week-latest",
                 children=[
-                    _finding_value(
-                        f"Cumulative baseline ({status.get('baseline_days', 0)} days)",
-                        f"{status['baseline']:.1f}",
+                    html.Span("LAST COMPLETED PERIOD", className="field-label"),
+                    html.Strong(f"Week {latest.get('week')}", className="week-number"),
+                    html.Strong(
+                        f"{latest.get('weekly_level', 0):.1f} bouts/day",
+                        className="week-level",
                     ),
-                    _finding_value(
-                        f"Current ({status.get('current_date', '—')})",
-                        status.get("current", "—"),
-                    ),
-                    _finding_value("Change", change_text),
+                    html.Strong(change_text, className="week-change", title=hover),
                 ],
-            ),
-            html.P(
-                "The comparison is descriptive and does not attribute the change to treatment.",
-                className="finding-copy",
-            ),
-        ],
-    )
+            )
+        )
+    return html.Div(className="week-finding", children=children)
 
 
-def _empty_treatment():
+def _empty_finding():
     return html.P(
-        "Select a patient and set a treatment start date.",
-        className="empty-state",
+        "Select a patient to evaluate monitoring progress.", className="empty-state"
     )
+
+
+def _trend_title(label: str, status: dict) -> str:
+    trend = status.get("trend") if status else None
+    if trend:
+        return f"Latest completed {label.lower()} period: {trend.title()}"
+    reason = status.get("reason") if status else None
+    if reason == "active_period":
+        return f"{label} trend will be available after the active period completes"
+    if reason == "warmup":
+        return f"{label} trend is forming its 7-period baseline"
+    return f"{label} trend unavailable"
 
 
 def _event_label(event: dict) -> str:
@@ -418,16 +357,19 @@ def _event_label(event: dict) -> str:
     return f"{cough_type} · {label}{duration_text}"
 
 
+def _utc_iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
-        # Plotly serializes aware datetimes to UTC. Supplying a naive datetime
-        # after conversion keeps axis labels in the configured patient-facing
-        # timezone instead of shifting Vietnam time seven hours backwards.
+            parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(DISPLAY_TIMEZONE).replace(tzinfo=None)
     except (TypeError, ValueError):
         return None
@@ -440,9 +382,7 @@ def _visible_patient(client_id) -> bool:
 
 def _visible_device(device: dict) -> bool:
     device_id = str(device.get("device_id") or "").strip().lower()
-    return device_id != "device_test_alert" and _visible_patient(
-        device.get("client_id")
-    )
+    return device_id != "device_test_alert" and _visible_patient(device.get("client_id"))
 
 
 def _fmt_ts(value: str | None) -> str:
@@ -451,7 +391,7 @@ def _fmt_ts(value: str | None) -> str:
     try:
         parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+            parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(DISPLAY_TIMEZONE).strftime("%m-%d %H:%M:%S")
     except (TypeError, ValueError):
         return str(value)
@@ -495,6 +435,6 @@ def _apply_chrome(fig: go.Figure, title: str) -> None:
         paper_bgcolor=_SURFACE,
         plot_bgcolor=_SURFACE,
         font={"family": _FONT, "size": 12, "color": _INK_2},
-        xaxis={"gridcolor": _GRID, "linecolor": _BASELINE, "zeroline": False},
-        yaxis={"gridcolor": _GRID, "linecolor": _BASELINE, "zeroline": False},
+        xaxis={"gridcolor": _GRID, "linecolor": "#c3c2b7", "zeroline": False},
+        yaxis={"gridcolor": _GRID, "linecolor": "#c3c2b7", "zeroline": False},
     )

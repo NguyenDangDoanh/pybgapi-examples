@@ -9,14 +9,14 @@ FLEET_TABLE_ID = "fleet-table"
 COUNT_CHART_ID = "count-chart"
 TYPE_PIE_ID = "type-pie"
 LIVE_FEED_TABLE_ID = "live-feed-table"
+LIVE_FEED_DATE_ID = "live-feed-date"
 TODAY_COUNT_ID = "today-count"
 LAST_EVENT_ID = "last-event"
 DAY_COUNT_ID = "day-count"
 NIGHT_COUNT_ID = "night-count"
-BASELINE_STATUS_ID = "baseline-status"
-TREATMENT_DATE_ID = "treatment-start-date"
-TREATMENT_RESPONSE_ID = "treatment-response"
-TREATMENT_REVISION_ID = "treatment-revision"
+DAY_CARD_ID = "day-period-card"
+NIGHT_CARD_ID = "night-period-card"
+STATISTICAL_FINDING_ID = "statistical-finding"
 
 POLL_INTERVAL_MS = 4000
 _FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
@@ -107,6 +107,13 @@ def _monitoring_section() -> html.Div:
                         ]
                     ),
                     html.Div(
+                        className="header-kpi",
+                        children=[
+                            html.Span("Cough bouts today", className="field-label"),
+                            html.Strong("—", id=TODAY_COUNT_ID),
+                        ],
+                    ),
+                    html.Div(
                         className="last-received-block",
                         children=[
                             html.Span("Last cough event", className="field-label"),
@@ -118,13 +125,6 @@ def _monitoring_section() -> html.Div:
             html.Div(
                 className="monitoring-header",
                 children=[
-                    html.Div(
-                        className="primary-kpi",
-                        children=[
-                            html.Span("Cough bouts today", className="kpi-label"),
-                            html.Strong("—", id=TODAY_COUNT_ID),
-                        ],
-                    ),
                     dcc.RadioItems(
                         id=RANGE_TOGGLE_ID,
                         options=[
@@ -161,10 +161,12 @@ def _monitoring_section() -> html.Div:
                 children=[
                     html.Div(
                         className="period-stat",
+                        id=DAY_CARD_ID,
                         children=[html.Span("Day"), html.Strong("—", id=DAY_COUNT_ID)],
                     ),
                     html.Div(
                         className="period-stat",
+                        id=NIGHT_CARD_ID,
                         children=[
                             html.Span("Night"),
                             html.Strong("—", id=NIGHT_COUNT_ID),
@@ -182,50 +184,12 @@ def _baseline_section() -> html.Div:
         children=[
             html.H2("Statistical findings"),
             html.Div(
-                id=BASELINE_STATUS_ID,
+                id=STATISTICAL_FINDING_ID,
                 children=html.P(
-                    "Select a patient to evaluate the recent personal baseline.",
+                    "Select a patient to evaluate monitoring progress.",
                     className="empty-state",
                 ),
             ),
-            html.Div(className="finding-divider"),
-            html.Div(
-                className="treatment-heading",
-                children=[
-                    html.Div(
-                        children=[
-                            html.Strong("Treatment response"),
-                            html.P(
-                                "Set one treatment start date for this patient.",
-                                className="finding-copy",
-                            ),
-                        ]
-                    ),
-                    html.Div(
-                        className="treatment-date-field",
-                        children=[
-                            html.Label(
-                                "Treatment start date",
-                                className="field-label",
-                            ),
-                            dcc.DatePickerSingle(
-                                id=TREATMENT_DATE_ID,
-                                display_format="YYYY-MM-DD",
-                                clearable=True,
-                                placeholder="YYYY-MM-DD",
-                            ),
-                        ],
-                    ),
-                ],
-            ),
-            html.Div(
-                id=TREATMENT_RESPONSE_ID,
-                children=html.P(
-                    "Select a patient and set a treatment start date.",
-                    className="empty-state",
-                ),
-            ),
-            dcc.Store(id=TREATMENT_REVISION_ID),
         ],
     )
 
@@ -234,7 +198,24 @@ def _live_feed_section() -> html.Div:
     return html.Div(
         className="card",
         children=[
-            html.H2("Live Feed"),
+            html.Div(
+                className="live-feed-heading",
+                children=[
+                    html.H2("Live Feed"),
+                    html.Div(
+                        className="live-feed-filter",
+                        children=[
+                            html.Label("Event date", className="field-label"),
+                            dcc.DatePickerSingle(
+                                id=LIVE_FEED_DATE_ID,
+                                display_format="YYYY-MM-DD",
+                                clearable=True,
+                                placeholder="All dates",
+                            ),
+                        ],
+                    ),
+                ],
+            ),
             dash_table.DataTable(
                 id=LIVE_FEED_TABLE_ID,
                 columns=[
