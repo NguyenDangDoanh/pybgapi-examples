@@ -198,13 +198,14 @@ The doctor dashboard contains:
 
 - a Device list above the patient view, with assignment, connection status,
   latest environment values, and last-seen time;
-- the patient selector, observed **Cough bouts today**, and **Last cough event**
-  (`MAX(event_ts)`) in one compact Cough monitoring header;
-- a 24-hour 30-minute stacked trend or 7-day daily bars plus Personal EWMA;
+- the patient selector and **Last cough event** (`MAX(event_ts)`) inside Cough
+  monitoring;
+- the observed cough-bout count for the local calendar date containing the
+  patient's latest event;
+- a 24-hour hourly trend or 7-day daily trend;
 - Wet/Dry/Unknown distribution computed from exactly the selected range;
 - Day (06:00-17:59) and Night (18:00-05:59) totals from that same range;
-- one Personal EWMA baseline, automatic weekly progress, and a patient-specific
-  Live Feed.
+- one recent personal bout baseline and a patient-specific Live Feed.
 
 ### Range anchoring
 
@@ -221,17 +222,14 @@ count, and baseline. A late `received_ts` from offline replay never extends or
 shifts the patient window. When a patient or range changes, or a genuinely
 newer cough arrives, the graph returns naturally to the latest anchored view.
 
-The 24-hour chart groups events into local 30-minute stacked bars. Each bar's
-height is the total number of completed cough bouts in the interval, while its
-Wet, Dry, and Unknown segments show composition at that time. Its right edge
-and tick alignment use the configured local timezone. Horizontal dragging can
-still inspect earlier event-time history; there is no separate latest button
-or zoom control. The Y axis uses integer bout counts.
-
-The 7-day chart uses local-calendar-day bars and overlays the one Personal EWMA
-trajectory. No EWMA value is drawn before the seven usable-day warm-up is
-complete. Later plotted points use the pre-update EWMA snapshot for the day,
-so a day's own cough count cannot immediately normalize itself.
+The 24-hour chart groups events into local 10-minute bars; each bar is the
+total number of completed cough bouts whose `event_ts` falls in that exact
+10-minute interval. Its right edge and tick alignment use the configured local
+timezone, so a latest cough at 11:07 is shown in the 11:00-11:09 bucket rather
+than appearing seven hours earlier on a UTC axis. Horizontal dragging pans
+left into up to seven days of earlier 10-minute history. There is no separate
+"latest" button, no zoom control, and no line connecting bar peaks. Axis labels
+show local clock time; hover details contain the date and time.
 
 ### Live Feed
 
@@ -249,7 +247,8 @@ the dashboard requests `?order=event` for occurrence order.
 The former `Suggestions` engine and API field have been removed. Its two
 automatic messages duplicated the baseline presentation or compared adjacent
 24-hour transport windows without adding patient context. The remaining
-statistical area now contains only the Personal EWMA finding described below.
+statistical area contains the EWMA finding and the separate treatment-response
+summary described below.
 
 The dashboard client/device selectors suppress legacy `client_test_alert`,
 `device_test_alert`, and unassigned rows. This presentation filter does not
@@ -257,14 +256,10 @@ delete database records automatically.
 
 ## Personal baseline
 
-The Personal EWMA baseline uses `alpha = 0.2` and is isolated by `client_id`.
-The first event date is the automatic Monitoring / Treatment Start marker and
-is conservatively excluded as a potentially partial day. Seven later completed
-usable days are required for warm-up. The EWMA continues updating after warm-up
-and is not frozen or replaced by another baseline. A day is compared with the
-EWMA snapshot from before that day is incorporated. Missing/unavailable dates
-retain the existing policy: they are omitted rather than invented as zero. The
-statistical threshold is:
+The recent personal baseline is an EWMA with `alpha = 0.2`. Seven completed
+observed days are required for warm-up. It continues updating after warm-up
+and is not a rolling seven-day window. Missing/unavailable days are omitted
+instead of being invented as zero. The statistical threshold is:
 
 ```text
 EWMA baseline + max(EWMA baseline * 0.40, 5)
@@ -275,19 +270,53 @@ The current payload does not contain the number of individual cough sounds
 inside a bout, so the gateway does not infer that quantity or run a second
 bout-grouping state machine.
 
-## Monitoring / treatment progress
+## Treatment response
 
-The progress section derives `Started` automatically from the patient's first
-valid event date. It groups completed usable monitoring days into sequential
-seven-day summaries. Week 1 is labelled Baseline formation; Week 2 and later
-show their average bouts/day and descriptive change against the Personal EWMA
-snapshot that existed before that week. An incomplete group is explicitly
-marked Partial. These weekly averages are visualization summaries, not another
-baseline algorithm, and the dashboard makes no treatment-effectiveness claim.
+The treatment marker is intentionally small: each patient can have one optional
+`treatment_start_date` (`YYYY-MM-DD`). It is stored independently in the
+`client_settings` table and can be set or cleared directly from the existing
+**Statistical findings** card. No medication name, dose, questionnaire, or
+additional treatment episode is collected.
 
-Older `client_settings.treatment_start_date` rows and their GET/PUT API remain
-available for database/API compatibility, but current analytics and dashboard
-rendering do not read or require that manual value.
+Treatment response does **not** replace the EWMA finding. The two calculations
+have different jobs:
+
+- **EWMA finding**: keeps the existing short-term check for whether today's
+  observed bout count is above the patient's recent normal range;
+- **Treatment response**: compares the most recent completed treatment day with
+  an expanding arithmetic-mean baseline.
+
+For treatment response, the first local calendar date containing an event is
+treated as partial and excluded. Starting with the following date, every
+completed local calendar day is included. Because this project assumes the
+device is monitoring continuously, a completed day with no recorded bout is a
+zero-bout day. At least seven full prior days are required.
+
+The latest completed day on or after the treatment marker is `Current`. Its
+baseline contains every completed full day before that current day. The current
+day is deliberately excluded from its own comparison; after it completes, it
+joins the cumulative baseline used for the following day. Therefore the
+baseline expands rather than sliding or remaining fixed:
+
+```text
+Day 8 comparison baseline = mean(Days 1..7)
+Day 9 comparison baseline = mean(Days 1..8)
+Change (%) = (Current - cumulative baseline) / cumulative baseline * 100
+```
+
+A negative percentage means fewer bouts and a positive percentage means more
+bouts than the cumulative baseline. The dashboard reports only this objective
+direction and does not label treatment effective or ineffective. Partial today
+is not used as the treatment-response `Current` value.
+
+The treatment setting API is:
+
+```text
+GET /api/clients/<client_id>/treatment
+PUT /api/clients/<client_id>/treatment
+Body: {"treatment_start_date": "2026-08-09"}
+Clear: {"treatment_start_date": null}
+```
 
 ## Optional dashboard demo data
 
@@ -302,12 +331,13 @@ Use `--db /path/to/cough_monitor.db` when `GATEWAY_DB_PATH` is not set and the
 database is elsewhere. The command creates only records whose message IDs use
 the reserved `demo-dashboard-` prefix plus these patients/devices:
 
-- `demo_patient_above_baseline` / `Demo Sensor 01`: a full Week 1 and Week 2,
-  a partial Week 3, a visible seven-day EWMA trajectory, clustered 30-minute
-  stacked bars, an above-EWMA current day, all cough types, Day/Night bouts,
-  prolonged labels, delayed replay, and environment readings;
-- `demo_patient_warmup` / `Demo Sensor 02`: insufficient completed usable days,
-  so the one personal baseline remains in formation.
+- `demo_patient_above_baseline` / `Demo Sensor 01`: enough completed days for
+  both EWMA and a decreasing treatment-response example, an above-EWMA current
+  day, all cough types, Day/Night bouts, prolonged labels, a delayed-replay
+  example, and environment readings;
+- `demo_patient_warmup` / `Demo Sensor 02`: three completed observed days so
+  the baseline remains in warm-up, plus offline device status and environment
+  readings.
 
 Running without `--replace` leaves existing demo rows untouched. Running with
 `--replace` deletes and rebuilds only rows created by this generator; real

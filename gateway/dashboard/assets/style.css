@@ -29,6 +29,7 @@ body {
 
 .subtitle,
 .field-label,
+.kpi-label,
 .disclaimer,
 .empty-state,
 .finding-copy {
@@ -87,28 +88,32 @@ body {
     text-align: right;
 }
 
-.last-received-block strong,
-.header-kpi strong {
-    display: block;
+.last-received-block strong {
     font-size: 15px;
-}
-
-.header-kpi {
-    min-width: 150px;
-    text-align: center;
-}
-
-.header-kpi strong {
-    font-size: 25px;
-    line-height: 1;
 }
 
 .monitoring-header {
     display: flex;
     align-items: flex-end;
-    justify-content: flex-end;
+    justify-content: space-between;
     gap: 20px;
     flex-wrap: wrap;
+}
+
+.primary-kpi {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.primary-kpi strong {
+    font-size: 36px;
+    line-height: 1.05;
+    letter-spacing: -0.04em;
+}
+
+.kpi-label {
+    font-size: 12px;
 }
 
 .range-toggle {
@@ -202,6 +207,45 @@ body {
     font-size: 13px;
 }
 
+.finding-divider {
+    height: 1px;
+    margin: 18px 0;
+    background: #e1e0d9;
+}
+
+.treatment-heading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+}
+
+.treatment-heading .finding-copy {
+    margin-top: 3px;
+}
+
+.treatment-date-field {
+    min-width: 190px;
+}
+
+.treatment-date-field .DateInput,
+.treatment-date-field .DateInput_input {
+    width: 150px;
+}
+
+.treatment-date-field .DateInput_input {
+    height: 34px;
+    padding: 0 10px;
+    font-size: 13px;
+}
+
+.finding-treatment {
+    border-color: #b8c8dc;
+    background: #f5f8fb;
+}
+
 .finding-values {
     display: flex;
     gap: 36px;
@@ -226,57 +270,6 @@ body {
     font-size: 18px;
 }
 
-.warmup-progress {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin-top: 12px;
-}
-
-.warmup-progress > strong {
-    min-width: 76px;
-    font-size: 16px;
-}
-
-.warmup-track {
-    flex: 1;
-    max-width: 360px;
-    height: 7px;
-    overflow: hidden;
-    border-radius: 99px;
-    background: #dce3ea;
-}
-
-.warmup-fill {
-    height: 100%;
-    border-radius: inherit;
-    background: #2a78d6;
-}
-
-.progress-card {
-    padding-bottom: 10px;
-}
-
-.progress-heading {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 20px;
-}
-
-.progress-start {
-    text-align: right;
-}
-
-.progress-start strong {
-    display: block;
-    font-size: 14px;
-}
-
-.progress-chart {
-    min-height: 280px;
-}
-
 .disclaimer {
     margin: 14px 0 0;
     font-size: 11.5px;
@@ -297,15 +290,6 @@ body {
     }
 
     .last-received-block {
-        text-align: left;
-    }
-
-    .header-kpi {
-        text-align: left;
-    }
-
-    .progress-heading,
-    .progress-start {
         text-align: left;
     }
 

@@ -74,43 +74,13 @@ def _day_night_counts(events: list[dict]) -> dict[str, int]:
 
 
 def _ten_minute_key(occurred: datetime) -> str:
-    """Return the local start timestamp of the legacy 10-minute bucket."""
+    """Return the local start timestamp of the event's 10-minute bucket."""
     bucket = occurred.replace(
         minute=(occurred.minute // 10) * 10,
         second=0,
         microsecond=0,
     )
     return bucket.strftime("%Y-%m-%dT%H:%M:%S%z")
-
-
-def _thirty_minute_key(occurred: datetime) -> str:
-    """Return the local start timestamp of the event's 30-minute bucket."""
-    bucket = occurred.replace(
-        minute=(occurred.minute // 30) * 30,
-        second=0,
-        microsecond=0,
-    )
-    return bucket.strftime("%Y-%m-%dT%H:%M:%S%z")
-
-
-def _rounded(value: float | None) -> float | None:
-    return round(value, 2) if value is not None else None
-
-
-def _typed_bucket_rows(
-    buckets: dict[str, dict[str, int]],
-) -> list[dict]:
-    rows: list[dict] = []
-    for key, counts in sorted(buckets.items()):
-        row = {
-            "ts": key,
-            "wet": int(counts.get("wet", 0)),
-            "dry": int(counts.get("dry", 0)),
-            "unknown": int(counts.get("unknown", 0)),
-        }
-        row["total"] = row["wet"] + row["dry"] + row["unknown"]
-        rows.append(row)
-    return rows
 
 
 class Analytics:
@@ -166,18 +136,11 @@ class Analytics:
 
         hourly_map: defaultdict[str, int] = defaultdict(int)
         ten_minute_map: defaultdict[str, int] = defaultdict(int)
-        thirty_minute_map: defaultdict[str, dict[str, int]] = defaultdict(
-            lambda: {"wet": 0, "dry": 0, "unknown": 0}
-        )
         for event in events_24h:
             occurred = _parse_ts(event.get("event_ts"))
             if occurred is not None:
                 hourly_map[occurred.strftime("%Y-%m-%dT%H:00:00%z")] += 1
                 ten_minute_map[_ten_minute_key(occurred)] += 1
-                cough_type = str(event.get("cough_type") or "unknown").lower()
-                if cough_type not in {"wet", "dry", "unknown"}:
-                    cough_type = "unknown"
-                thirty_minute_map[_thirty_minute_key(occurred)][cough_type] += 1
 
         daily_map: defaultdict[str, int] = defaultdict(int)
         for event in events_7d:
@@ -187,9 +150,6 @@ class Analytics:
 
         hourly_history_map: defaultdict[str, int] = defaultdict(int)
         ten_minute_history_map: defaultdict[str, int] = defaultdict(int)
-        thirty_minute_history_map: defaultdict[str, dict[str, int]] = defaultdict(
-            lambda: {"wet": 0, "dry": 0, "unknown": 0}
-        )
         for event in events_hour_history:
             occurred = _parse_ts(event.get("event_ts"))
             if occurred is not None:
@@ -197,29 +157,15 @@ class Analytics:
                     occurred.strftime("%Y-%m-%dT%H:00:00%z")
                 ] += 1
                 ten_minute_history_map[_ten_minute_key(occurred)] += 1
-                cough_type = str(event.get("cough_type") or "unknown").lower()
-                if cough_type not in {"wet", "dry", "unknown"}:
-                    cough_type = "unknown"
-                thirty_minute_history_map[_thirty_minute_key(occurred)][
-                    cough_type
-                ] += 1
 
         all_events = self.dao.get_events(client_id=client_id)
-        ewma_timeline = self.personal_ewma_timeline(client_id, now=now_utc)
-        baseline = self.ewma_baseline_status(
+        baseline = self.ewma_baseline_status(client_id, now=now_utc)
+        client_settings = self.dao.get_client_settings(client_id)
+        treatment_response = self.treatment_response_status(
             client_id,
+            treatment_start_date=client_settings.get("treatment_start_date"),
             now=now_utc,
-            _timeline=ewma_timeline,
         )
-        monitoring_progress = self.monitoring_progress_status(
-            client_id,
-            now=now_utc,
-            _timeline=ewma_timeline,
-        )
-        ewma_by_date = {
-            item["date"]: item.get("display_baseline")
-            for item in ewma_timeline["days"]
-        }
 
         by_type_24h = _type_counts(events_24h)
         by_type_7d = _type_counts(events_7d)
@@ -240,11 +186,7 @@ class Analytics:
                 for key, value in sorted(ten_minute_map.items())
             ],
             "per_day": [
-                {
-                    "date": key,
-                    "count": value,
-                    "ewma_baseline": ewma_by_date.get(key),
-                }
+                {"date": key, "count": value}
                 for key, value in sorted(daily_map.items())
             ],
             "per_hour_history": [
@@ -255,10 +197,6 @@ class Analytics:
                 {"ts": key, "count": value}
                 for key, value in sorted(ten_minute_history_map.items())
             ],
-            "per_30_minute": _typed_bucket_rows(thirty_minute_map),
-            "per_30_minute_history": _typed_bucket_rows(
-                thirty_minute_history_map
-            ),
             "last_24h_count": len(events_24h),
             "last_7d_count": len(events_7d),
             "today_count": baseline["today_count"],
@@ -267,7 +205,7 @@ class Analytics:
             "day_night_24h": day_night_24h,
             "day_night_7d": day_night_7d,
             "baseline": baseline,
-            "monitoring_progress": monitoring_progress,
+            "treatment_response": treatment_response,
             "last_event_ts": last_event_ts,
             # Transport receipt remains available to API consumers for audit
             # and reconnect diagnostics, but does not drive patient analytics.
@@ -275,187 +213,128 @@ class Analytics:
             "analysis_anchor_ts": _iso_utc(now_utc),
         }
 
-    def personal_ewma_timeline(
+    def treatment_response_status(
         self,
         client_id: str,
-        alpha: float = 0.2,
+        treatment_start_date: str | None,
         warmup_days: int = 7,
         now: datetime | None = None,
     ) -> dict:
-        """Return the single patient EWMA trajectory using completed usable days.
+        """Compare the latest completed treatment day with prior full days.
 
-        The first event date is the automatic monitoring start marker and is
-        conservatively excluded because coverage before its first event is
-        unknown. Missing dates retain the existing EWMA policy: they are not
-        converted into zero-count monitoring days.
+        The first local calendar day containing data is conservatively treated
+        as partial. Every later completed calendar day is included, including
+        zero-bout days under the project's continuous-monitoring assumption.
+        The current day is never compared with a baseline that contains itself;
+        once completed, it joins the expanding baseline for the following day.
         """
-        if not 0.0 < alpha <= 1.0:
-            raise ValueError("alpha must be in the range (0, 1]")
         if warmup_days <= 0:
             raise ValueError("warmup_days must be positive")
 
-        now_utc = _as_utc(now)
-        today = now_utc.astimezone(DISPLAY_TIMEZONE).date()
-        observed = self.daily_cough_counts(client_id=client_id, now=now_utc)
-        if not observed:
-            return {
-                "client_id": client_id,
-                "start_date": None,
-                "today": today.isoformat(),
-                "alpha": alpha,
-                "warmup_days": warmup_days,
-                "completed_usable_days": 0,
-                "warmup_remaining": warmup_days,
-                "current_baseline": None,
-                "_current_baseline_raw": None,
-                "days": [],
-            }
-
-        start_date = date.fromisoformat(observed[0]["date"])
-        days: list[dict] = [
-            {
-                "date": observed[0]["date"],
-                "count": int(observed[0]["count"]),
-                "complete": start_date < today,
-                "usable": False,
-                "phase": "start_partial",
-                "baseline_before": None,
-                "baseline_after": None,
-                "display_baseline": None,
-            }
-        ]
-        completed = [
-            item
-            for item in observed[1:]
-            if date.fromisoformat(item["date"]) < today
-        ]
-
-        ewma: float | None = None
-        for index, item in enumerate(completed):
-            count = int(item["count"])
-            baseline_before = ewma if index >= warmup_days else None
-            ewma = count if ewma is None else alpha * count + (1.0 - alpha) * ewma
-            display_baseline = None
-            if index == warmup_days - 1:
-                # The baseline becomes ready at the end of the seventh usable day.
-                display_baseline = ewma
-            elif index >= warmup_days:
-                # Later days are assessed against the pre-update snapshot.
-                display_baseline = baseline_before
-            days.append(
-                {
-                    "date": item["date"],
-                    "count": count,
-                    "complete": True,
-                    "usable": True,
-                    "phase": "warmup" if index < warmup_days else "monitoring",
-                    "baseline_before": _rounded(baseline_before),
-                    "baseline_after": _rounded(ewma),
-                    "display_baseline": _rounded(display_baseline),
-                }
-            )
-
-        current_item = next(
-            (
-                item
-                for item in observed[1:]
-                if date.fromisoformat(item["date"]) == today
-            ),
-            None,
-        )
-        if current_item is not None:
-            ready = len(completed) >= warmup_days
-            days.append(
-                {
-                    "date": current_item["date"],
-                    "count": int(current_item["count"]),
-                    "complete": False,
-                    "usable": False,
-                    "phase": "current" if ready else "warmup_current",
-                    "baseline_before": _rounded(ewma) if ready else None,
-                    "baseline_after": None,
-                    "display_baseline": _rounded(ewma) if ready else None,
-                }
-            )
-
-        completed_count = len(completed)
-        return {
+        base = {
             "client_id": client_id,
-            "start_date": start_date.isoformat(),
-            "today": today.isoformat(),
-            "alpha": alpha,
+            "treatment_start_date": treatment_start_date,
             "warmup_days": warmup_days,
-            "completed_usable_days": completed_count,
-            "warmup_remaining": max(warmup_days - completed_count, 0),
-            "current_baseline": (
-                _rounded(ewma) if completed_count >= warmup_days else None
-            ),
-            "_current_baseline_raw": (
-                ewma if completed_count >= warmup_days else None
-            ),
-            "days": sorted(days, key=lambda item: item["date"]),
+            "available": False,
+            "baseline": None,
+            "current": None,
+            "current_date": None,
+            "change_percent": None,
+            "direction": None,
+            "baseline_days": 0,
+            "warmup_remaining": warmup_days,
         }
+        if not treatment_start_date:
+            return {**base, "reason": "treatment_not_set"}
+        try:
+            treatment_day = date.fromisoformat(str(treatment_start_date))
+        except (TypeError, ValueError):
+            return {**base, "reason": "invalid_treatment_date"}
 
-    def monitoring_progress_status(
-        self,
-        client_id: str,
-        alpha: float = 0.2,
-        warmup_days: int = 7,
-        now: datetime | None = None,
-        _timeline: dict | None = None,
-    ) -> dict:
-        """Summarize completed usable days into seven-day visual periods."""
-        timeline = _timeline or self.personal_ewma_timeline(
-            client_id, alpha=alpha, warmup_days=warmup_days, now=now
+        now_utc = _as_utc(now)
+        completed_through = (
+            now_utc.astimezone(DISPLAY_TIMEZONE).date() - timedelta(days=1)
         )
-        usable_days = [
-            item
-            for item in timeline["days"]
-            if item.get("complete") and item.get("usable")
+        events = self.dao.get_events_by_occurrence(
+            client_id=client_id,
+            end_time=_iso_utc(now_utc),
+        )
+        dated_events: list[tuple[date, dict]] = []
+        for event in events:
+            occurred = _parse_ts(event.get("event_ts"))
+            if occurred is not None:
+                dated_events.append((occurred.date(), event))
+        if not dated_events:
+            return {**base, "reason": "no_data"}
+
+        # We cannot prove that monitoring covered the part of the first day
+        # before the first event, so full-day accounting begins the next day.
+        first_full_day = min(day for day, _event in dated_events) + timedelta(days=1)
+        if first_full_day > completed_through:
+            return {**base, "reason": "no_completed_day"}
+
+        counts: defaultdict[date, int] = defaultdict(int)
+        for day, _event in dated_events:
+            if first_full_day <= day <= completed_through:
+                counts[day] += 1
+
+        completed_days: list[dict] = []
+        cursor = first_full_day
+        while cursor <= completed_through:
+            completed_days.append({"date": cursor, "count": counts[cursor]})
+            cursor += timedelta(days=1)
+
+        treatment_days = [
+            item for item in completed_days if item["date"] >= treatment_day
         ]
-        weeks: list[dict] = []
-        for offset in range(0, len(usable_days), 7):
-            group = usable_days[offset : offset + 7]
-            week_number = offset // 7 + 1
-            average = sum(item["count"] for item in group) / len(group)
-            ewma_reference = (
-                group[0].get("baseline_before") if week_number > 1 else None
-            )
-            change_percent = (
-                ((average - ewma_reference) / ewma_reference) * 100.0
-                if ewma_reference is not None and ewma_reference > 0
-                else None
-            )
-            weeks.append(
-                {
-                    "week": week_number,
-                    "label": f"Week {week_number}",
-                    "start_date": group[0]["date"],
-                    "end_date": group[-1]["date"],
-                    "usable_days": len(group),
-                    "complete": len(group) == 7,
-                    "average_per_day": round(average, 1),
-                    "ewma_reference": _rounded(ewma_reference),
-                    "change_percent": (
-                        round(change_percent, 1)
-                        if change_percent is not None
-                        else None
-                    ),
-                    "status": (
-                        "baseline_formation"
-                        if week_number == 1
-                        else "complete" if len(group) == 7 else "partial"
-                    ),
-                }
-            )
+        if not treatment_days:
+            return {
+                **base,
+                "completed_days": len(completed_days),
+                "reason": "awaiting_completed_treatment_day",
+            }
+
+        current_day = treatment_days[-1]
+        baseline_days = [
+            item for item in completed_days if item["date"] < current_day["date"]
+        ]
+        remaining = max(warmup_days - len(baseline_days), 0)
+        pending = {
+            **base,
+            "current": int(current_day["count"]),
+            "current_date": current_day["date"].isoformat(),
+            "baseline_days": len(baseline_days),
+            "completed_days": len(completed_days),
+            "warmup_remaining": remaining,
+        }
+        if remaining:
+            return {**pending, "reason": "warmup"}
+
+        cumulative_baseline = sum(
+            int(item["count"]) for item in baseline_days
+        ) / len(baseline_days)
+        current_count = int(current_day["count"])
+        change_percent = (
+            ((current_count - cumulative_baseline) / cumulative_baseline) * 100.0
+            if cumulative_baseline > 0
+            else None
+        )
+        if current_count < cumulative_baseline:
+            direction = "decreased"
+        elif current_count > cumulative_baseline:
+            direction = "increased"
+        else:
+            direction = "unchanged"
 
         return {
-            "client_id": client_id,
-            "start_date": timeline["start_date"],
-            "warmup_days": warmup_days,
-            "completed_usable_days": timeline["completed_usable_days"],
-            "warmup_remaining": timeline["warmup_remaining"],
-            "weeks": weeks,
+            **pending,
+            "available": True,
+            "baseline": round(cumulative_baseline, 2),
+            "change_percent": (
+                round(change_percent, 1) if change_percent is not None else None
+            ),
+            "direction": direction,
+            "reason": None if change_percent is not None else "zero_baseline",
         }
 
     def hourly_counts(
@@ -532,7 +411,6 @@ class Analytics:
         min_buffer: float = 5.0,
         warmup_days: int = 7,
         now: datetime | None = None,
-        _timeline: dict | None = None,
     ) -> dict:
         """Compare today's observed bout count with the ongoing EWMA baseline."""
         if not 0.0 < alpha <= 1.0:
@@ -545,32 +423,31 @@ class Analytics:
             raise ValueError("warmup_days must be positive")
 
         now_utc = _as_utc(now)
-        timeline = _timeline or self.personal_ewma_timeline(
-            client_id, alpha=alpha, warmup_days=warmup_days, now=now_utc
-        )
-        today = timeline["today"]
-        today_item = next(
-            (item for item in timeline["days"] if item["date"] == today),
-            None,
-        )
-        today_count = int(today_item["count"]) if today_item is not None else None
-        completed_count = int(timeline["completed_usable_days"])
+        today = now_utc.astimezone(DISPLAY_TIMEZONE).strftime("%Y-%m-%d")
+        daily_counts = self.daily_cough_counts(client_id=client_id, now=now_utc)
+
+        today_count: int | None = None
+        completed_days: list[dict] = []
+        for item in daily_counts:
+            if item["date"] == today:
+                today_count = int(item["count"])
+            elif item["date"] < today:
+                completed_days.append(item)
 
         base = {
             "client_id": client_id,
             "today": today,
             "today_count": today_count,
             "current_available": today_count is not None,
-            "monitoring_start_date": timeline["start_date"],
-            "observed_history_days": completed_count,
+            "observed_history_days": len(completed_days),
             "warmup_days": warmup_days,
-            "warmup_remaining": timeline["warmup_remaining"],
+            "warmup_remaining": max(warmup_days - len(completed_days), 0),
             "alpha": alpha,
             "threshold_pct": threshold_pct,
             "min_buffer": min_buffer,
         }
 
-        if completed_count < warmup_days:
+        if len(completed_days) < warmup_days:
             return {
                 **base,
                 "available": False,
@@ -583,7 +460,9 @@ class Analytics:
                 "reason": "warmup",
             }
 
-        baseline = float(timeline["_current_baseline_raw"])
+        baseline = float(completed_days[0]["count"])
+        for item in completed_days[1:]:
+            baseline = alpha * int(item["count"]) + (1.0 - alpha) * baseline
 
         threshold = baseline + max(baseline * threshold_pct, min_buffer)
         above = today_count is not None and today_count > threshold
