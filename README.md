@@ -78,9 +78,11 @@ Live Feed is also ordered by event time. See [current data flow and timestamp
 responsibilities](gateway/README.md#current-data-flow-and-timestamp-responsibilities)
 for the complete ingest, storage, API, analytics, and dashboard behavior.
 
-The dashboard also keeps the existing EWMA abnormal-day finding and provides a
-separate, optional cumulative [treatment-response comparison](gateway/README.md#treatment-response)
-using one start-date marker per patient.
+The dashboard uses one continuously updated Personal EWMA baseline per patient.
+It derives the monitoring start automatically, displays 30-minute Wet/Dry/Unknown
+stacks for 24 hours, overlays EWMA on the 7-day daily trend, and summarizes
+[monitoring/treatment progress](gateway/README.md#monitoring--treatment-progress)
+without creating a second baseline.
 
 ## Generic Application Classes
 

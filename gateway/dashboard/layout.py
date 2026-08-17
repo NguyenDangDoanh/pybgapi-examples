@@ -14,9 +14,8 @@ LAST_EVENT_ID = "last-event"
 DAY_COUNT_ID = "day-count"
 NIGHT_COUNT_ID = "night-count"
 BASELINE_STATUS_ID = "baseline-status"
-TREATMENT_DATE_ID = "treatment-start-date"
-TREATMENT_RESPONSE_ID = "treatment-response"
-TREATMENT_REVISION_ID = "treatment-revision"
+PROGRESS_START_ID = "monitoring-start"
+PROGRESS_CHART_ID = "monitoring-progress-chart"
 
 POLL_INTERVAL_MS = 4000
 _FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
@@ -61,6 +60,7 @@ def make_layout() -> html.Div:
             _fleet_section(),
             _monitoring_section(),
             _baseline_section(),
+            _progress_section(),
             _live_feed_section(),
         ],
     )
@@ -107,6 +107,13 @@ def _monitoring_section() -> html.Div:
                         ]
                     ),
                     html.Div(
+                        className="header-kpi",
+                        children=[
+                            html.Span("Cough bouts today", className="field-label"),
+                            html.Strong("—", id=TODAY_COUNT_ID),
+                        ],
+                    ),
+                    html.Div(
                         className="last-received-block",
                         children=[
                             html.Span("Last cough event", className="field-label"),
@@ -118,13 +125,6 @@ def _monitoring_section() -> html.Div:
             html.Div(
                 className="monitoring-header",
                 children=[
-                    html.Div(
-                        className="primary-kpi",
-                        children=[
-                            html.Span("Cough bouts today", className="kpi-label"),
-                            html.Strong("—", id=TODAY_COUNT_ID),
-                        ],
-                    ),
                     dcc.RadioItems(
                         id=RANGE_TOGGLE_ID,
                         options=[
@@ -188,44 +188,32 @@ def _baseline_section() -> html.Div:
                     className="empty-state",
                 ),
             ),
-            html.Div(className="finding-divider"),
+        ],
+    )
+
+
+def _progress_section() -> html.Div:
+    return html.Div(
+        className="card progress-card",
+        children=[
             html.Div(
-                className="treatment-heading",
+                className="progress-heading",
                 children=[
+                    html.H2("Monitoring / treatment progress"),
                     html.Div(
+                        className="progress-start",
                         children=[
-                            html.Strong("Treatment response"),
-                            html.P(
-                                "Set one treatment start date for this patient.",
-                                className="finding-copy",
-                            ),
-                        ]
-                    ),
-                    html.Div(
-                        className="treatment-date-field",
-                        children=[
-                            html.Label(
-                                "Treatment start date",
-                                className="field-label",
-                            ),
-                            dcc.DatePickerSingle(
-                                id=TREATMENT_DATE_ID,
-                                display_format="YYYY-MM-DD",
-                                clearable=True,
-                                placeholder="YYYY-MM-DD",
-                            ),
+                            html.Span("Started", className="field-label"),
+                            html.Strong("—", id=PROGRESS_START_ID),
                         ],
                     ),
                 ],
             ),
-            html.Div(
-                id=TREATMENT_RESPONSE_ID,
-                children=html.P(
-                    "Select a patient and set a treatment start date.",
-                    className="empty-state",
-                ),
+            dcc.Graph(
+                id=PROGRESS_CHART_ID,
+                config={"displayModeBar": False},
+                className="progress-chart",
             ),
-            dcc.Store(id=TREATMENT_REVISION_ID),
         ],
     )
 

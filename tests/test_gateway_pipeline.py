@@ -345,21 +345,29 @@ class AnalyticsTest(unittest.TestCase):
         )
         self.assertEqual({"day": 1, "night": 1}, stats["day_night_24h"])
 
-    def test_24h_trend_uses_ten_minute_buckets(self) -> None:
-        now = datetime(2026, 8, 14, 4, 7, tzinfo=timezone.utc)
-        # 11:01 and 11:07 local share one bucket; 10:59 is the prior bucket.
-        self._insert(now - timedelta(minutes=8), now - timedelta(minutes=8))
-        self._insert(now - timedelta(minutes=6), now - timedelta(minutes=6))
-        self._insert(now, now)
+    def test_24h_trend_uses_stacked_thirty_minute_buckets(self) -> None:
+        now = datetime(2026, 8, 14, 4, 29, tzinfo=timezone.utc)
+        # 11:01, 11:07 and 11:29 local share a bucket; 10:59 is prior.
+        self._insert(now - timedelta(minutes=30), now, "unknown")
+        self._insert(now - timedelta(minutes=28), now, "wet")
+        self._insert(now - timedelta(minutes=22), now, "dry")
+        self._insert(now, now, "wet")
 
         stats = self.analytics.get_client_stats(self.client_id, now=now)
 
         self.assertEqual(
-            [1, 2],
-            [item["count"] for item in stats["per_10_minute"]],
+            [1, 3],
+            [item["total"] for item in stats["per_30_minute"]],
         )
-        self.assertTrue(stats["per_10_minute"][0]["ts"].endswith("+0700"))
-        self.assertIn("T11:00:00+0700", stats["per_10_minute"][1]["ts"])
+        self.assertTrue(stats["per_30_minute"][0]["ts"].endswith("+0700"))
+        self.assertIn("T11:00:00+0700", stats["per_30_minute"][1]["ts"])
+        self.assertEqual(
+            {"wet": 2, "dry": 1, "unknown": 0},
+            {
+                key: stats["per_30_minute"][1][key]
+                for key in ("wet", "dry", "unknown")
+            },
+        )
 
     def test_default_24h_window_ends_at_latest_event_time(self) -> None:
         last_event = datetime(2026, 8, 5, 8, 0, tzinfo=timezone.utc)
@@ -394,8 +402,10 @@ class AnalyticsTest(unittest.TestCase):
 
     def test_ewma_warmup_threshold_and_continuing_update(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
-        local_day_anchor_utc = datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc)
-        counts = [10, 20, 30, 40, 50, 60, 70]
+        local_day_anchor_utc = datetime(2026, 8, 5, 5, 0, tzinfo=timezone.utc)
+        # The first event date is the automatic partial start marker. The next
+        # seven completed usable days form the initial EWMA.
+        counts = [99, 10, 20, 30, 40, 50, 60, 70]
         for day_offset, count in enumerate(counts):
             occurred = local_day_anchor_utc + timedelta(days=day_offset)
             for _ in range(count):
@@ -407,6 +417,7 @@ class AnalyticsTest(unittest.TestCase):
 
         self.assertTrue(status["available"])
         self.assertEqual(7, status["observed_history_days"])
+        self.assertEqual("2026-08-05", status["monitoring_start_date"])
         self.assertEqual(0.2, status["alpha"])
         self.assertEqual(40.49, status["baseline"])
         self.assertEqual(56.68, status["threshold"])
@@ -424,12 +435,12 @@ class AnalyticsTest(unittest.TestCase):
         self.assertEqual(6, len(daily))
         self.assertFalse(status["available"])
         self.assertEqual("warmup", status["reason"])
-        self.assertEqual(1, status["warmup_remaining"])
+        self.assertEqual(2, status["warmup_remaining"])
 
     def test_client_baselines_are_isolated(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
         other_client = "client_other"
-        for day_offset in range(1, 8):
+        for day_offset in range(1, 9):
             occurred = now - timedelta(days=day_offset, hours=1)
             self._insert(occurred, occurred, client_id=other_client)
 
@@ -450,83 +461,77 @@ class AnalyticsTest(unittest.TestCase):
         cleared = self.dao.set_treatment_start_date(self.client_id, None)
         self.assertIsNone(cleared["treatment_start_date"])
 
-    def test_treatment_response_uses_prior_expanding_full_days(self) -> None:
-        # UTC 05:00 is local noon. August 1 is excluded as the conservative
-        # partial first day; August 2-8 form the initial seven-day baseline.
-        self._insert(
-            datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc),
-            datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc),
-        )
-        for day_number, count in zip(range(2, 9), (10, 20, 30, 40, 50, 60, 70)):
-            occurred = datetime(
-                2026, 8, day_number, 5, 0, tzinfo=timezone.utc
-            )
-            for _ in range(count):
-                self._insert(occurred, occurred)
-        day_nine = datetime(2026, 8, 9, 5, 0, tzinfo=timezone.utc)
-        for _ in range(80):
-            self._insert(day_nine, day_nine)
-
-        initial = self.analytics.treatment_response_status(
-            self.client_id,
-            "2026-08-09",
-            now=datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc),
-        )
-        self.assertTrue(initial["available"])
-        self.assertEqual(7, initial["baseline_days"])
-        self.assertEqual(40.0, initial["baseline"])
-        self.assertEqual(80, initial["current"])
-        self.assertEqual(100.0, initial["change_percent"])
-        self.assertEqual("increased", initial["direction"])
-
-        day_ten = datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc)
-        for _ in range(20):
-            self._insert(day_ten, day_ten)
-        expanded = self.analytics.treatment_response_status(
-            self.client_id,
-            "2026-08-09",
-            now=datetime(2026, 8, 11, 5, 0, tzinfo=timezone.utc),
-        )
-        self.assertEqual(8, expanded["baseline_days"])
-        self.assertEqual(45.0, expanded["baseline"])
-        self.assertEqual(20, expanded["current"])
-        self.assertEqual(-55.6, expanded["change_percent"])
-        self.assertEqual("decreased", expanded["direction"])
-
-    def test_treatment_response_counts_completed_zero_days(self) -> None:
+    def test_ewma_timeline_uses_pre_update_snapshot_and_keeps_updating(self) -> None:
         first = datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc)
         self._insert(first, first)
-        day_two = datetime(2026, 8, 2, 5, 0, tzinfo=timezone.utc)
-        for _ in range(7):
-            self._insert(day_two, day_two)
+        for day_number, count in zip(
+            range(2, 10),
+            (10, 20, 30, 40, 50, 60, 70, 80),
+        ):
+            occurred = datetime(2026, 8, day_number, 5, 0, tzinfo=timezone.utc)
+            for _ in range(count):
+                self._insert(occurred, occurred)
 
-        status = self.analytics.treatment_response_status(
+        timeline = self.analytics.personal_ewma_timeline(
             self.client_id,
-            "2026-08-09",
             now=datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc),
         )
-        self.assertTrue(status["available"])
-        self.assertEqual(7, status["baseline_days"])
-        self.assertEqual(1.0, status["baseline"])
-        self.assertEqual(0, status["current"])
-        self.assertEqual(-100.0, status["change_percent"])
+        usable = [item for item in timeline["days"] if item["usable"]]
 
-    def test_treatment_response_keeps_separate_seven_day_warmup(self) -> None:
-        for day_number in range(1, 6):
-            occurred = datetime(
-                2026, 8, day_number, 5, 0, tzinfo=timezone.utc
-            )
-            self._insert(occurred, occurred)
+        self.assertEqual("2026-08-01", timeline["start_date"])
+        self.assertEqual(8, timeline["completed_usable_days"])
+        self.assertTrue(all(item["display_baseline"] is None for item in usable[:6]))
+        self.assertEqual(40.49, usable[6]["display_baseline"])
+        self.assertEqual(40.49, usable[7]["baseline_before"])
+        self.assertEqual(48.39, usable[7]["baseline_after"])
+        self.assertEqual(48.39, timeline["current_baseline"])
 
-        status = self.analytics.treatment_response_status(
+    def test_seven_day_series_hides_ewma_until_warmup_is_complete(self) -> None:
+        for day_number, count in zip(
+            range(1, 10),
+            (99, 10, 20, 30, 40, 50, 60, 70, 80),
+        ):
+            occurred = datetime(2026, 8, day_number, 5, 0, tzinfo=timezone.utc)
+            for _ in range(count):
+                self._insert(occurred, occurred)
+
+        stats = self.analytics.get_client_stats(
             self.client_id,
-            "2026-08-04",
-            now=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc),
         )
-        self.assertFalse(status["available"])
-        self.assertEqual("warmup", status["reason"])
-        self.assertEqual(3, status["baseline_days"])
-        self.assertEqual(4, status["warmup_remaining"])
+        series = {item["date"]: item for item in stats["per_day"]}
+
+        self.assertTrue(
+            all(
+                series[day]["ewma_baseline"] is None
+                for day in ("2026-08-03", "2026-08-04", "2026-08-05")
+            )
+        )
+        self.assertEqual(40.49, series["2026-08-08"]["ewma_baseline"])
+        self.assertEqual(40.49, series["2026-08-09"]["ewma_baseline"])
+
+    def test_monitoring_progress_starts_automatically_and_uses_one_ewma(self) -> None:
+        start = datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc)
+        self._insert(start, start)
+        for day_number in range(2, 17):
+            occurred = datetime(2026, 8, day_number, 5, 0, tzinfo=timezone.utc)
+            for _ in range(10 if day_number < 9 else 6):
+                self._insert(occurred, occurred)
+
+        stats = self.analytics.get_client_stats(
+            self.client_id,
+            now=datetime(2026, 8, 17, 5, 0, tzinfo=timezone.utc),
+        )
+        progress = stats["monitoring_progress"]
+
+        self.assertNotIn("treatment_response", stats)
+        self.assertEqual("2026-08-01", progress["start_date"])
+        self.assertEqual(3, len(progress["weeks"]))
+        self.assertEqual("baseline_formation", progress["weeks"][0]["status"])
+        self.assertTrue(progress["weeks"][1]["complete"])
+        self.assertIsNotNone(progress["weeks"][1]["ewma_reference"])
+        self.assertEqual("partial", progress["weeks"][2]["status"])
+        self.assertNotIn("baseline", progress["weeks"][1])
 
 
 class DemoDataTest(unittest.TestCase):
@@ -542,21 +547,29 @@ class DemoDataTest(unittest.TestCase):
                 warmup = analytics.get_client_stats(WARMUP_CLIENT, now=now)
 
                 self.assertTrue(first["created"])
-                self.assertEqual(123, first["events"])
+                self.assertEqual(170, first["events"])
                 self.assertEqual(22, above["today_count"])
                 self.assertTrue(above["baseline"]["available"])
                 self.assertTrue(above["baseline"]["above_baseline"])
-                self.assertTrue(above["treatment_response"]["available"])
                 self.assertEqual(
-                    "decreased", above["treatment_response"]["direction"]
+                    "2026-07-29", above["monitoring_progress"]["start_date"]
+                )
+                self.assertEqual(3, len(above["monitoring_progress"]["weeks"]))
+                self.assertEqual(
+                    "partial", above["monitoring_progress"]["weeks"][2]["status"]
+                )
+                self.assertTrue(
+                    any(
+                        item["total"] >= 3
+                        for item in above["per_30_minute"]
+                    )
                 )
                 self.assertGreater(above["day_night_24h"]["day"], 0)
                 self.assertGreater(above["day_night_24h"]["night"], 0)
                 self.assertTrue(all(above["by_type_24h"].values()))
                 self.assertEqual(4, warmup["today_count"])
                 self.assertFalse(warmup["baseline"]["available"])
-                self.assertEqual(4, warmup["baseline"]["warmup_remaining"])
-                self.assertFalse(warmup["treatment_response"]["available"])
+                self.assertEqual(5, warmup["baseline"]["warmup_remaining"])
 
                 devices = {item["name"]: item for item in dao.get_devices()}
                 self.assertEqual("online", devices["Demo Sensor 01"]["status"])

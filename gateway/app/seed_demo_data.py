@@ -28,13 +28,27 @@ def _local_datetime(day: date, hour: int, minute: int = 0) -> datetime:
 
 
 def _today_times(local_now: datetime, count: int) -> list[datetime]:
-    """Distribute demo bouts before now without creating future timestamps."""
+    """Create visible 30-minute stacks without producing future timestamps."""
     midnight = datetime.combine(local_now.date(), time.min, DISPLAY_TIMEZONE)
-    elapsed = max((local_now - midnight).total_seconds(), count + 1)
-    return [
-        midnight + timedelta(seconds=elapsed * (index + 1) / (count + 1))
-        for index in range(count)
+    clustered_count = min(count, 6)
+    cluster_end = max(midnight, local_now - timedelta(minutes=5))
+    cluster_start = max(midnight, cluster_end - timedelta(minutes=20))
+    clustered = [
+        cluster_start + timedelta(
+            seconds=(cluster_end - cluster_start).total_seconds() * index
+            / max(clustered_count - 1, 1)
+        )
+        for index in range(clustered_count)
     ]
+    remaining_count = count - clustered_count
+    earlier_span = max((cluster_start - midnight).total_seconds(), remaining_count + 1)
+    earlier = [
+        midnight + timedelta(
+            seconds=earlier_span * (index + 1) / (remaining_count + 1)
+        )
+        for index in range(remaining_count)
+    ]
+    return sorted(earlier + clustered)
 
 
 def _historical_times(day: date, count: int) -> list[datetime]:
@@ -165,11 +179,29 @@ def seed_demo_data(
         last_seen=warmup_last_seen,
     )
 
-    # Nine completed dates provide one conservative partial first day, seven
-    # expanding-baseline days, and one post-treatment comparison day.
-    above_history = [8, 9, 10, 9, 11, 10, 10, 7, 5]
+    # The first date is conservatively partial. Fifteen later completed dates
+    # provide a full Week 1, a full Week 2, and a partial Week 3 while keeping
+    # the single EWMA baseline visibly active in the recent seven-day view.
+    above_history = [
+        8,
+        10,
+        9,
+        11,
+        10,
+        8,
+        9,
+        10,
+        8,
+        7,
+        7,
+        6,
+        7,
+        6,
+        5,
+        5,
+    ]
     above_schedule = [
-        (local_now.date() - timedelta(days=9 - index), count)
+        (local_now.date() - timedelta(days=16 - index), count)
         for index, count in enumerate(above_history)
     ]
     above_schedule.append((local_now.date(), 22))
@@ -187,12 +219,6 @@ def seed_demo_data(
     warmup_count = _insert_bouts(
         dao, WARMUP_CLIENT, WARMUP_DEVICE, warmup_schedule, local_now
     )
-    dao.set_treatment_start_date(
-        ABOVE_CLIENT,
-        (local_now.date() - timedelta(days=1)).isoformat(),
-    )
-    dao.set_treatment_start_date(WARMUP_CLIENT, local_now.date().isoformat())
-
     dao.insert_environment(
         {
             "message_id": f"{DEMO_PREFIX}environment-01",
