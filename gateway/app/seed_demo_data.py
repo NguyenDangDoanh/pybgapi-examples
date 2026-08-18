@@ -11,15 +11,10 @@ from .analytics import DISPLAY_TIMEZONE
 from .dao import Dao
 
 DEMO_PREFIX = "demo-dashboard-"
+ABOVE_CLIENT = "demo_patient_above_baseline"
 WARMUP_CLIENT = "demo_patient_warmup"
-WEEK2_CLIENT = "demo_patient_week2_incomplete"
-COMPLETED_CLIENT = "demo_patient_week3"
-ABOVE_CLIENT = COMPLETED_CLIENT  # Backward-compatible import alias.
-LEGACY_ABOVE_CLIENT = "demo_patient_above_baseline"
-WARMUP_DEVICE = "02:00:00:00:00:01"
-WEEK2_DEVICE = "02:00:00:00:00:02"
-COMPLETED_DEVICE = "02:00:00:00:00:03"
-ABOVE_DEVICE = COMPLETED_DEVICE  # Backward-compatible import alias.
+ABOVE_DEVICE = "02:00:00:00:00:01"
+WARMUP_DEVICE = "02:00:00:00:00:02"
 
 
 def _utc_iso(value: datetime) -> str:
@@ -33,14 +28,8 @@ def _local_datetime(day: date, hour: int, minute: int = 0) -> datetime:
 
 
 def _today_times(local_now: datetime, count: int) -> list[datetime]:
-    """Create visible 30-minute clusters without future timestamps."""
+    """Distribute demo bouts before now without creating future timestamps."""
     midnight = datetime.combine(local_now.date(), time.min, DISPLAY_TIMEZONE)
-    if local_now - midnight >= timedelta(hours=4):
-        start = local_now - timedelta(hours=3)
-        return [
-            start + timedelta(minutes=(index // 4) * 30 + (index % 4) * 4)
-            for index in range(count)
-        ]
     elapsed = max((local_now - midnight).total_seconds(), count + 1)
     return [
         midnight + timedelta(seconds=elapsed * (index + 1) / (count + 1))
@@ -68,8 +57,8 @@ def _delete_existing_demo(dao: Dao) -> None:
             "DELETE FROM environment_readings WHERE message_id LIKE ?", (pattern,)
         )
         connection.execute(
-            "DELETE FROM client_settings WHERE client_id IN (?, ?, ?, ?)",
-            (WARMUP_CLIENT, WEEK2_CLIENT, COMPLETED_CLIENT, LEGACY_ABOVE_CLIENT),
+            "DELETE FROM client_settings WHERE client_id IN (?, ?)",
+            (ABOVE_CLIENT, WARMUP_CLIENT),
         )
         connection.commit()
 
@@ -111,10 +100,9 @@ def _insert_bouts(
                 | ((duration_s & 0x1F) << 3)
             )
             received = occurred + timedelta(seconds=2)
-            # A delayed replay crosses local dates so Live Feed filtering can
-            # prove that occurrence time, never receipt time, owns the event.
-            if day == local_now.date() - timedelta(days=2) and index == 0:
-                received = local_now
+            # One delayed row exercises event_ts vs received_ts in Live Feed.
+            if day == local_now.date() and index == 0:
+                received = local_now - timedelta(seconds=5)
             event_ts = _utc_iso(occurred)
             dao.insert_event(
                 {
@@ -147,7 +135,7 @@ def _insert_bouts(
 def seed_demo_data(
     dao: Dao, now: datetime | None = None, replace: bool = False
 ) -> dict:
-    """Seed three final-spec demo patients; return a compact result summary."""
+    """Seed two demo patients; return a compact result summary."""
     now_utc = now or datetime.now(timezone.utc)
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
@@ -158,78 +146,61 @@ def seed_demo_data(
             return {"created": False, "reason": "demo_data_already_exists"}
         _delete_existing_demo(dao)
 
-    completed_last_seen = _utc_iso(now_utc - timedelta(minutes=18))
+    above_last_seen = _utc_iso(now_utc)
     warmup_last_seen = _utc_iso(now_utc - timedelta(minutes=35))
     dao.upsert_device(
-        WARMUP_DEVICE,
+        ABOVE_DEVICE,
         name="Demo Sensor 01",
+        address_type=0,
+        client_id=ABOVE_CLIENT,
+        status="online",
+        last_seen=above_last_seen,
+    )
+    dao.upsert_device(
+        WARMUP_DEVICE,
+        name="Demo Sensor 02",
         address_type=0,
         client_id=WARMUP_CLIENT,
         status="offline",
         last_seen=warmup_last_seen,
     )
-    dao.upsert_device(
-        WEEK2_DEVICE,
-        name="Demo Sensor 02",
-        address_type=0,
-        client_id=WEEK2_CLIENT,
-        status="online",
-        last_seen=_utc_iso(now_utc - timedelta(minutes=8)),
-    )
-    dao.upsert_device(
-        COMPLETED_DEVICE,
-        name="Demo Sensor 03",
-        address_type=0,
-        client_id=COMPLETED_CLIENT,
-        status="offline",
-        last_seen=completed_last_seen,
-    )
 
-    # First date in every schedule is deliberately partial and not usable.
+    # Nine completed dates provide one conservative partial first day, seven
+    # expanding-baseline days, and one post-treatment comparison day.
+    above_history = [8, 9, 10, 9, 11, 10, 10, 7, 5]
+    above_schedule = [
+        (local_now.date() - timedelta(days=9 - index), count)
+        for index, count in enumerate(above_history)
+    ]
+    above_schedule.append((local_now.date(), 22))
+
     warmup_schedule = [
-        (local_now.date() - timedelta(days=5), 3),
-        (local_now.date() - timedelta(days=4), 4),
         (local_now.date() - timedelta(days=3), 5),
-        (local_now.date() - timedelta(days=2), 6),
-        (local_now.date() - timedelta(days=1), 5),
+        (local_now.date() - timedelta(days=2), 7),
+        (local_now.date() - timedelta(days=1), 6),
         (local_now.date(), 4),
     ]
-    week2_counts = [4, 6, 7, 8, 7, 6, 8, 7, 9, 10, 8]
-    week2_schedule = [
-        (local_now.date() - timedelta(days=11 - index), count)
-        for index, count in enumerate(week2_counts)
-    ]
-    week2_schedule.append((local_now.date(), 6))
-    completed_counts = [
-        5,
-        8, 9, 10, 9, 11, 10, 10,
-        16, 15, 14, 13, 12, 11, 10,
-        9, 8, 7,
-    ]
-    completed_schedule = [
-        (local_now.date() - timedelta(days=18 - index), count)
-        for index, count in enumerate(completed_counts)
-    ]
-    completed_schedule.append((local_now.date(), 18))
 
+    above_count = _insert_bouts(
+        dao, ABOVE_CLIENT, ABOVE_DEVICE, above_schedule, local_now
+    )
     warmup_count = _insert_bouts(
         dao, WARMUP_CLIENT, WARMUP_DEVICE, warmup_schedule, local_now
     )
-    week2_count = _insert_bouts(
-        dao, WEEK2_CLIENT, WEEK2_DEVICE, week2_schedule, local_now
+    dao.set_treatment_start_date(
+        ABOVE_CLIENT,
+        (local_now.date() - timedelta(days=1)).isoformat(),
     )
-    completed_count = _insert_bouts(
-        dao, COMPLETED_CLIENT, COMPLETED_DEVICE, completed_schedule, local_now
-    )
+    dao.set_treatment_start_date(WARMUP_CLIENT, local_now.date().isoformat())
 
     dao.insert_environment(
         {
             "message_id": f"{DEMO_PREFIX}environment-01",
             "session_id": "demo-session",
-            "device_id": COMPLETED_DEVICE,
-            "client_id": COMPLETED_CLIENT,
-            "event_ts": completed_last_seen,
-            "received_ts": completed_last_seen,
+            "device_id": ABOVE_DEVICE,
+            "client_id": ABOVE_CLIENT,
+            "event_ts": above_last_seen,
+            "received_ts": above_last_seen,
             "temperature_c": 27.4,
             "humidity_percent": 63.2,
             "temperature_x100": 2740,
@@ -252,44 +223,13 @@ def seed_demo_data(
             "payload_hex": None,
         }
     )
-    dao.insert_environment(
-        {
-            "message_id": f"{DEMO_PREFIX}environment-03",
-            "session_id": "demo-session",
-            "device_id": WEEK2_DEVICE,
-            "client_id": WEEK2_CLIENT,
-            "event_ts": _utc_iso(now_utc - timedelta(minutes=8)),
-            "received_ts": _utc_iso(now_utc - timedelta(minutes=8)),
-            "temperature_c": 27.1,
-            "humidity_percent": 62.4,
-            "temperature_x100": 2710,
-            "humidity_x100": 6240,
-            "payload_hex": None,
-        }
-    )
-    dao.insert_environment(
-        {
-            "message_id": f"{DEMO_PREFIX}environment-04",
-            "session_id": "demo-session",
-            "device_id": COMPLETED_DEVICE,
-            "client_id": COMPLETED_CLIENT,
-            "event_ts": _utc_iso(now_utc - timedelta(minutes=18)),
-            "received_ts": _utc_iso(now_utc - timedelta(minutes=18)),
-            "temperature_c": 27.7,
-            "humidity_percent": 60.9,
-            "temperature_x100": 2770,
-            "humidity_x100": 6090,
-            "payload_hex": None,
-        }
-    )
 
     return {
         "created": True,
-        "patients": [WARMUP_CLIENT, WEEK2_CLIENT, COMPLETED_CLIENT],
-        "events": warmup_count + week2_count + completed_count,
+        "patients": [ABOVE_CLIENT, WARMUP_CLIENT],
+        "events": above_count + warmup_count,
+        "above_baseline_events": above_count,
         "warmup_events": warmup_count,
-        "week2_events": week2_count,
-        "completed_week_events": completed_count,
     }
 
 

@@ -222,18 +222,14 @@ count, and baseline. A late `received_ts` from offline replay never extends or
 shifts the patient window. When a patient or range changes, or a genuinely
 newer cough arrives, the graph returns naturally to the latest anchored view.
 
-The 24-hour chart groups events into single-color local 30-minute bars. Every
-bar is the total number of completed cough bouts whose `event_ts` is inside
-that interval; Wet/Dry/Unknown never creates stacked bars. The right edge is
-the selected patient's latest cough time, integer Y ticks are used, and hover
-text is intentionally short (`08:00–08:30`, `4 bouts`). Horizontal dragging
-can inspect earlier history without exposing zoom controls or connecting bar
-peaks.
-
-The 7-day chart uses one bar per local date. It draws exactly one horizontal
-reference line at the current Personal EWMA computed from completed prior
-usable days. This is not a historical EWMA trajectory. The active day's bar
-may be visible, but that incomplete day does not update the line.
+The 24-hour chart groups events into local 10-minute bars; each bar is the
+total number of completed cough bouts whose `event_ts` falls in that exact
+10-minute interval. Its right edge and tick alignment use the configured local
+timezone, so a latest cough at 11:07 is shown in the 11:00-11:09 bucket rather
+than appearing seven hours earlier on a UTC axis. Horizontal dragging pans
+left into up to seven days of earlier 10-minute history. There is no separate
+"latest" button, no zoom control, and no line connecting bar peaks. Axis labels
+show local clock time; hover details contain the date and time.
 
 ### Live Feed
 
@@ -243,83 +239,77 @@ Live Feed is always visible and is sorted newest-first by `event_ts`. It shows:
 - **Event**: Wet/Dry/Unknown, `Cough bout` or `Prolonged bout`, and firmware
   duration when present.
 
-The optional local Event date picker defaults to **All dates**. Its UTC query
-bounds are derived from the selected local date and filter `event_ts`, so an
-offline replay remains on the date when the patient coughed. Clearing the
-picker restores all events and the table keeps its existing pagination.
-
 There is no separate BOUT column and no Received time column. `received_ts`
 has not been deleted: it remains in SQLite and is still returned by the API for
 transport audit. `/api/clients/<client_id>/events` defaults to receipt order;
 the dashboard requests `?order=event` for occurrence order.
 
-The former `Suggestions` engine and cumulative treatment UI are not used by
-the dashboard.
+The former `Suggestions` engine and API field have been removed. Its two
+automatic messages duplicated the baseline presentation or compared adjacent
+24-hour transport windows without adding patient context. The remaining
+statistical area contains the EWMA finding and the separate treatment-response
+summary described below.
 
 The dashboard client/device selectors suppress legacy `client_test_alert`,
 `device_test_alert`, and unassigned rows. This presentation filter does not
 delete database records automatically.
 
-## Dashboard analytics contract
+## Personal baseline
 
-### Personal EWMA
-
-Each patient has one long-running Personal EWMA with `alpha = 0.2`. Monitoring
-starts automatically on the first valid local event date. That first date is
-shown as the start marker but conservatively treated as partial, so it is not
-one of the seven completed usable warm-up days. Missing/unavailable dates are
-omitted rather than invented as zero monitoring days.
-
-After warm-up, the Personal EWMA continues updating every completed usable
-day. The active day is excluded. A day is compared with the pre-update
-baseline; only after completion can it update the value used by the following
-day. The existing abnormal-day threshold remains available to API consumers:
+The recent personal baseline is an EWMA with `alpha = 0.2`. Seven completed
+observed days are required for warm-up. It continues updating after warm-up
+and is not a rolling seven-day window. Missing/unavailable days are omitted
+instead of being invented as zero. The statistical threshold is:
 
 ```text
 EWMA baseline + max(EWMA baseline * 0.40, 5)
 ```
 
+There is one whole-day baseline; Day and Night do not have separate baselines.
 The current payload does not contain the number of individual cough sounds
 inside a bout, so the gateway does not infer that quantity or run a second
-bout-grouping state machine. Each received cough event is already one bout.
+bout-grouping state machine.
 
-### Day and Night
+## Treatment response
 
-Visible Day/Night cards contain counts only. Day is 06:00–17:59 local time;
-Night is 18:00–05:59 and belongs to the local date on which it starts. Day and
-Night maintain independent internal EWMA streams with the same `alpha = 0.2`
-and seven-completed-period warm-up. Hover may show Increasing, Decreasing, or
-Stable, using a centralized ±10% tolerance. It never exposes the internal
-baseline value. The currently active incomplete period has no trend result.
+The treatment marker is intentionally small: each patient can have one optional
+`treatment_start_date` (`YYYY-MM-DD`). It is stored independently in the
+`client_settings` table and can be set or cleared directly from the existing
+**Statistical findings** card. No medication name, dose, questionnaire, or
+additional treatment episode is collected.
 
-### Sequential treatment weeks
+Treatment response does **not** replace the EWMA finding. The two calculations
+have different jobs:
 
-Treatment weeks start automatically after the partial first date and are
-sequential blocks of seven completed usable days, not calendar weeks. There is
-no manual treatment date and no cumulative arithmetic treatment baseline.
+- **EWMA finding**: keeps the existing short-term check for whether today's
+  observed bout count is above the patient's recent normal range;
+- **Treatment response**: compares the most recent completed treatment day with
+  an expanding arithmetic-mean baseline.
 
-Week 1 forms the Personal EWMA baseline and only reports progress such as
-`5 / 7 completed days`. For Week 2 and later, the analytics layer captures a
-fixed start-of-week snapshot of the Personal EWMA. The main Personal EWMA still
-updates after each completed usable day; the snapshot does not move.
+For treatment response, the first local calendar date containing an event is
+treated as partial and excluded. Starting with the following date, every
+completed local calendar day is included. Because this project assumes the
+device is monitoring continuously, a completed day with no recorded bout is a
+zero-bout day. At least seven full prior days are required.
 
-A temporary `weekly_level` is calculated by applying EWMA only to the seven
-counts inside that week, resetting at every week boundary. It is a weekly
-summary, not another baseline. No result is published until all seven usable
-days are complete:
+The latest completed day on or after the treatment marker is `Current`. Its
+baseline contains every completed full day before that current day. The current
+day is deliberately excluded from its own comparison; after it completes, it
+joins the cumulative baseline used for the following day. Therefore the
+baseline expands rather than sliding or remaining fixed:
 
 ```text
-Change (%) = (weekly_level - week_reference_snapshot)
-             / week_reference_snapshot * 100
+Day 8 comparison baseline = mean(Days 1..7)
+Day 9 comparison baseline = mean(Days 1..8)
+Change (%) = (Current - cumulative baseline) / cumulative baseline * 100
 ```
 
-A zero reference produces `N/A`. Statistical Findings shows only the active
-week's progress and the latest completed evaluable week; it does not render a
-week-history chart.
+A negative percentage means fewer bouts and a positive percentage means more
+bouts than the cumulative baseline. The dashboard reports only this objective
+direction and does not label treatment effective or ineffective. Partial today
+is not used as the treatment-response `Current` value.
 
-The legacy treatment-setting API and `client_settings.treatment_start_date`
-remain accepted for database/API compatibility, but the dashboard no longer
-reads or writes them:
+The treatment setting API is:
 
 ```text
 GET /api/clients/<client_id>/treatment
@@ -339,15 +329,15 @@ python -m gateway.app.seed_demo_data --replace
 
 Use `--db /path/to/cough_monitor.db` when `GATEWAY_DB_PATH` is not set and the
 database is elsewhere. The command creates only records whose message IDs use
-the reserved `demo-dashboard-` prefix plus these states:
+the reserved `demo-dashboard-` prefix plus these patients/devices:
 
-- `demo_patient_warmup`: Personal EWMA formation at 4/7 usable days;
-- `demo_patient_week2_incomplete`: Week 2 calculating at 3/7 usable days;
-- `demo_patient_week3`: active Week 3 with a completed Week 2 result.
-
-Together they include clustered 30-minute bars, all cough types, Day/Night
-history, prolonged labels, environment readings, and a replay whose
-`event_ts` and `received_ts` fall on different local dates.
+- `demo_patient_above_baseline` / `Demo Sensor 01`: enough completed days for
+  both EWMA and a decreasing treatment-response example, an above-EWMA current
+  day, all cough types, Day/Night bouts, prolonged labels, a delayed-replay
+  example, and environment readings;
+- `demo_patient_warmup` / `Demo Sensor 02`: three completed observed days so
+  the baseline remains in warm-up, plus offline device status and environment
+  readings.
 
 Running without `--replace` leaves existing demo rows untouched. Running with
 `--replace` deletes and rebuilds only rows created by this generator; real
@@ -373,10 +363,8 @@ python -m unittest discover -s tests -v
 
 The tests cover legacy and extended timestamps, fixed-size bout-flag decoding
 and persistence, latest-event range anchoring despite delayed replay,
-occurrence-ordered Live Feed queries, range-specific cough types, 30-minute
-totals, Day/Night grouping and independent trend warm-up, Personal EWMA
-warm-up/continuous update/missing-day behavior, fixed weekly snapshots,
-temporary weekly EWMA, zero-reference handling, client isolation, two
+occurrence-ordered Live Feed queries, range-specific cough types, Day/Night
+grouping, EWMA warm-up/threshold/missing-day behavior, client isolation, two
 nodes using the same event counter, duplicate replay across reconnect, uint16
 wrap, environment persistence and validation, old-database migration,
 concurrent socket clients, per-connection BLE notification routing, optional
