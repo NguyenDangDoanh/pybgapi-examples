@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
-
-_MIN_TRUSTED_NODE_TIME = datetime(2020, 1, 1, tzinfo=timezone.utc)
 
 
 def _to_utc_iso(value: datetime) -> str:
@@ -38,35 +36,19 @@ def resolve_event_timestamp(
     node_timestamp_seconds: int | None,
     received_at: str,
 ) -> tuple[str, str]:
-    """Use a plausible node Unix timestamp, otherwise gateway receive time.
-
-    Existing xG26 firmware currently sends zero.  Zero, dates before 2020, and
-    values more than one day ahead of the gateway clock are treated as
-    untrusted while the raw integer is still retained in the payload fields.
-    """
+    """Use a positive node Unix timestamp; zero falls back to receive time."""
     received_iso = canonical_utc_iso(received_at)
-    received_dt = datetime.fromisoformat(received_iso.replace("Z", "+00:00"))
-
-    if node_timestamp_seconds is not None:
-        try:
+    try:
+        node_timestamp = int(node_timestamp_seconds)
+        if node_timestamp > 0:
             node_dt = datetime.fromtimestamp(
-                int(node_timestamp_seconds), tz=timezone.utc
+                node_timestamp, tz=timezone.utc
             )
-        except (OverflowError, OSError, TypeError, ValueError):
-            node_dt = None
-
-        if (
-            node_dt is not None
-            and _MIN_TRUSTED_NODE_TIME <= node_dt <= received_dt + timedelta(days=1)
-        ):
             return _to_utc_iso(node_dt), "node_unix_seconds"
+    except (OverflowError, OSError, TypeError, ValueError):
+        pass
 
-    source = (
-        "gateway_received_untrusted_node_value"
-        if node_timestamp_seconds not in (None, 0)
-        else "gateway_received"
-    )
-    return received_iso, source
+    return received_iso, "gateway_received"
 
 
 def normalize_uuid(uuid_text: str) -> str:

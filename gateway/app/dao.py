@@ -73,6 +73,11 @@ class Dao:
             "session_id": "TEXT",
             "node_event_timestamp": "INTEGER",
             "timestamp_source": "TEXT",
+            "flags": "INTEGER",
+            "timestamp_valid": "INTEGER",
+            "stage2_valid": "INTEGER",
+            "prolonged": "INTEGER",
+            "duration_s": "INTEGER",
             "payload_hex": "TEXT",
         }.items():
             self._ensure_column("cough_events", column, declaration)
@@ -89,6 +94,8 @@ class Dao:
                 ON cough_events(received_ts DESC);
             CREATE INDEX IF NOT EXISTS ix_cough_client_received
                 ON cough_events(client_id, received_ts DESC);
+            CREATE INDEX IF NOT EXISTS ix_cough_client_event
+                ON cough_events(client_id, event_ts DESC);
             CREATE UNIQUE INDEX IF NOT EXISTS ux_environment_message_id
                 ON environment_readings(message_id) WHERE message_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS ix_environment_device_received
@@ -113,8 +120,9 @@ class Dao:
             INSERT OR IGNORE INTO cough_events (
                 message_id, session_id, device_id, client_id, cough_type,
                 event_ts, received_ts, event_counter, node_event_timestamp,
-                timestamp_source, payload_hex
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                timestamp_source, flags, timestamp_valid, stage2_valid,
+                prolonged, duration_s, payload_hex
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         values = (
             evt.get("message_id"),
@@ -127,6 +135,11 @@ class Dao:
             evt.get("event_counter"),
             evt.get("node_event_timestamp"),
             evt.get("timestamp_source"),
+            evt.get("flags"),
+            evt.get("timestamp_valid"),
+            evt.get("stage2_valid"),
+            evt.get("prolonged"),
+            evt.get("duration_s"),
             evt.get("payload_hex"),
         )
         with self._lock:
@@ -165,7 +178,13 @@ class Dao:
         client_id: str,
         start_time: str | None = None,
         end_time: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Return transport-ordered events for audit use.
+
+        Time filters intentionally use ``received_ts``. Occurrence-time
+        analytics must use :meth:`get_events_by_occurrence` instead.
+        """
         sql = "SELECT * FROM cough_events WHERE client_id = ?"
         params: list[object] = [client_id]
         if start_time is not None:
@@ -175,8 +194,63 @@ class Dao:
             sql += " AND received_ts <= ?"
             params.append(end_time)
         sql += " ORDER BY received_ts DESC, id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(self._clamp_limit(limit))
         with self._lock:
             return self._rows(self._get_conn().execute(sql, params))
+
+    def get_events_by_occurrence(
+        self,
+        client_id: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        limit: int | None = None,
+        descending: bool = False,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return cough bouts filtered by their captured occurrence time.
+
+        ``event_ts`` is the bout start time. This keeps offline FIFO replay in
+        the hour/day where the bout occurred instead of the reconnect window.
+        """
+        sql = "SELECT * FROM cough_events WHERE client_id = ?"
+        params: list[object] = [client_id]
+        if start_time is not None:
+            sql += " AND event_ts >= ?"
+            params.append(start_time)
+        if end_time is not None:
+            sql += " AND event_ts <= ?"
+            params.append(end_time)
+        direction = "DESC" if descending else "ASC"
+        sql += f" ORDER BY event_ts {direction}, id {direction}"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(self._clamp_limit(limit))
+            if offset:
+                sql += " OFFSET ?"
+                params.append(max(int(offset), 0))
+        with self._lock:
+            return self._rows(self._get_conn().execute(sql, params))
+
+    def count_events_by_occurrence(
+        self,
+        client_id: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> int:
+        """Count patient events in an occurrence-time range."""
+        sql = "SELECT COUNT(*) FROM cough_events WHERE client_id = ?"
+        params: list[object] = [client_id]
+        if start_time is not None:
+            sql += " AND event_ts >= ?"
+            params.append(start_time)
+        if end_time is not None:
+            sql += " AND event_ts <= ?"
+            params.append(end_time)
+        with self._lock:
+            row = self._get_conn().execute(sql, params).fetchone()
+        return int(row[0]) if row is not None else 0
 
     def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         limit = self._clamp_limit(limit)
@@ -281,13 +355,50 @@ class Dao:
     def get_client_summaries(self) -> list[dict[str, Any]]:
         return self.list_clients()
 
+    def get_client_settings(self, client_id: str) -> dict[str, Any]:
+        """Return persisted per-patient dashboard settings."""
+        with self._lock:
+            row = self._get_conn().execute(
+                "SELECT * FROM client_settings WHERE client_id = ?",
+                (client_id,),
+            ).fetchone()
+        if row is None:
+            return {
+                "client_id": client_id,
+                "treatment_start_date": None,
+                "updated_at": None,
+            }
+        return dict(row)
+
+    def set_treatment_start_date(
+        self, client_id: str, treatment_start_date: str | None
+    ) -> dict[str, Any]:
+        """Persist or clear the single treatment marker for one patient."""
+        updated_at = datetime.now(timezone.utc).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+        with self._lock:
+            self._get_conn().execute(
+                """
+                INSERT INTO client_settings (
+                    client_id, treatment_start_date, updated_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET
+                    treatment_start_date = excluded.treatment_start_date,
+                    updated_at = excluded.updated_at
+                """,
+                (client_id, treatment_start_date, updated_at),
+            )
+            self._get_conn().commit()
+        return self.get_client_settings(client_id)
+
     def get_hourly_counts(self, client_id: str) -> list[dict[str, Any]]:
         start_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         sql = """
-            SELECT strftime('%Y-%m-%d %H:00:00', received_ts) AS time_bucket,
+            SELECT strftime('%Y-%m-%d %H:00:00', event_ts) AS time_bucket,
                    cough_type, COUNT(*) AS count
             FROM cough_events
-            WHERE client_id = ? AND received_ts >= ?
+            WHERE client_id = ? AND event_ts >= ?
             GROUP BY time_bucket, cough_type
             ORDER BY time_bucket ASC
         """
@@ -297,10 +408,10 @@ class Dao:
     def get_daily_counts(self, client_id: str) -> list[dict[str, Any]]:
         start_time = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         sql = """
-            SELECT strftime('%Y-%m-%d', received_ts) AS time_bucket,
+            SELECT strftime('%Y-%m-%d', event_ts) AS time_bucket,
                    cough_type, COUNT(*) AS count
             FROM cough_events
-            WHERE client_id = ? AND received_ts >= ?
+            WHERE client_id = ? AND event_ts >= ?
             GROUP BY time_bucket, cough_type
             ORDER BY time_bucket ASC
         """

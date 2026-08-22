@@ -5,11 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import struct
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import bgapi
+from bgapi.connector import ConnectorException
 
 from advertisement import extract_advertised_name
 from backend_client import JsonLineBackend
@@ -24,6 +27,7 @@ from constants import (
     GATT_PROCEDURE_TIMEOUT_SECONDS,
     GATT_NOTIFICATION,
     GATT_PROPERTY_NOTIFY,
+    GATT_PROPERTY_WRITE,
     PHY_1M,
     RECONNECT_DELAY_SECONDS,
     SCAN_ACTIVE,
@@ -58,6 +62,7 @@ class BleCentral:
         self.target_service_uuid = uuid_to_bgapi_bytes(args.service_uuid)
         self.target_cough_uuid = uuid_to_bgapi_bytes(args.cough_uuid)
         self.target_environment_uuid = uuid_to_bgapi_bytes(args.environment_uuid)
+        self.target_time_uuid = uuid_to_bgapi_bytes(args.time_uuid)
         self.target_address = (
             normalize_address(args.address) if args.address is not None else None
         )
@@ -71,6 +76,7 @@ class BleCentral:
         self.retry_after_by_address: dict[str, float] = {}
         self.boot_deadline = 0.0
         self.scan_retry_after = 0.0
+        self.utc_sync_date = datetime.now(timezone.utc).date()
         self.session_id = str(uuid.uuid4())
         self.sequence = 0
 
@@ -81,7 +87,7 @@ class BleCentral:
     def run(self) -> None:
         try:
             self.lib.open()
-        except (OSError, bgapi.bglib.BGLibError) as exc:
+        except (OSError, ConnectorException) as exc:
             raise SystemExit(
                 f"Cannot open BGM220 NCP at {self.args.serial_port}: {exc}\n"
                 "Check the serial path, dialout membership, and whether "
@@ -108,6 +114,7 @@ class BleCentral:
                     )
 
                 self._check_timeouts(now)
+                self._check_daily_time_sync()
 
                 if (
                     self.booted
@@ -175,6 +182,13 @@ class BleCentral:
                 if state.status_reported:
                     self._emit_status(state, "disconnected")
                 self._forget_connection(state)
+                continue
+            if state.phase.startswith("sync_time"):
+                LOG.error(
+                    "[%s] Time synchronization timeout; disconnecting only this node",
+                    state.address,
+                )
+                self.disconnect_connection(state.handle)
                 continue
             if state.phase != "running":
                 LOG.error(
@@ -372,10 +386,30 @@ class BleCentral:
             state.environment_characteristic = event.characteristic
             state.environment_characteristic_uuid = uuid_text
             state.environment_characteristic_properties = properties
+        elif bytes(event.uuid) == self.target_time_uuid:
+            state.time_characteristic = event.characteristic
+            state.time_characteristic_uuid = uuid_text
+            state.time_characteristic_properties = properties
+            if not properties & GATT_PROPERTY_WRITE:
+                LOG.warning(
+                    "[%s] Time characteristic does not advertise Write; "
+                    "time synchronization will be skipped",
+                    state.address,
+                )
 
     def on_gatt_procedure_completed(self, event: Any) -> None:
         state = self._state_for_event(event)
         if state is None:
+            return
+        if event.result != 0 and state.phase.startswith("sync_time"):
+            LOG.warning(
+                "[%s] Optional time synchronization failed phase=%s result=0x%04x; "
+                "notifications remain active",
+                state.address,
+                state.phase,
+                event.result,
+            )
+            self._finish_time_sync(state, succeeded=False)
             return
         if event.result != 0:
             LOG.error(
@@ -394,17 +428,9 @@ class BleCentral:
         elif state.phase == "enable_cough_notifications":
             self._enable_environment_notifications(state)
         elif state.phase == "enable_environment_notifications":
-            state.phase = "running"
-            state.phase_deadline = 0.0
-            LOG.info(
-                "[%s] Notifications enabled: cough=%s environment=%s",
-                state.address,
-                state.cough_characteristic,
-                state.environment_characteristic,
-            )
-            self._emit_status(state, "connected")
-            state.status_reported = True
-            self.start_scan()
+            self._finish_notification_setup(state)
+        elif state.phase.startswith("sync_time"):
+            self._finish_time_sync(state, succeeded=True)
 
     def _finish_service_discovery(self, state: ConnectionState) -> None:
         if state.target_service is None:
@@ -449,6 +475,107 @@ class BleCentral:
         except bgapi.bglib.CommandFailedError as exc:
             LOG.error("[%s] Cannot enable environment notifications: 0x%04x", state.address, exc.errorcode)
             self.disconnect_connection(state.handle)
+
+    def _finish_notification_setup(self, state: ConnectionState) -> None:
+        LOG.info(
+            "[%s] Notifications enabled: cough=%s environment=%s",
+            state.address,
+            state.cough_characteristic,
+            state.environment_characteristic,
+        )
+        if self._start_time_sync(state, "connect"):
+            return
+        self._mark_running(state)
+
+    def _start_time_sync(
+        self,
+        state: ConnectionState,
+        reason: str,
+        epoch: int | None = None,
+    ) -> bool:
+        """Start one per-node GATT time write without waiting for completion."""
+        if state.time_characteristic is None:
+            return False
+        if not state.time_characteristic_properties & GATT_PROPERTY_WRITE:
+            return False
+
+        sync_epoch = int(time.time()) if epoch is None else int(epoch)
+        if not 0 < sync_epoch <= 0xFFFFFFFF:
+            LOG.warning(
+                "[%s] Unix epoch %r does not fit uint32; skipping time sync",
+                state.address,
+                sync_epoch,
+            )
+            return False
+
+        state.phase = f"sync_time_{reason}"
+        state.pending_time_sync_epoch = sync_epoch
+        state.pending_time_sync_reason = reason
+        self._set_phase_deadline(state)
+        try:
+            self.lib.bt.gatt.write_characteristic_value(
+                state.handle,
+                state.time_characteristic,
+                struct.pack("<I", sync_epoch),
+            )
+        except bgapi.bglib.CommandFailedError as exc:
+            LOG.warning(
+                "[%s] Optional time synchronization command failed: 0x%04x; "
+                "notifications remain active",
+                state.address,
+                exc.errorcode,
+            )
+            self._finish_time_sync(state, succeeded=False)
+            return True
+
+        LOG.info(
+            "[%s] Writing Unix epoch=%d to Time characteristic (%s)",
+            state.address,
+            sync_epoch,
+            reason,
+        )
+        return True
+
+    def _finish_time_sync(
+        self, state: ConnectionState, succeeded: bool
+    ) -> None:
+        reason = state.pending_time_sync_reason
+        epoch = state.pending_time_sync_epoch
+        if succeeded:
+            state.last_time_sync_epoch = epoch
+            state.last_time_sync_reason = reason
+            LOG.info(
+                "[%s] Time synchronized epoch=%s reason=%s",
+                state.address,
+                epoch,
+                reason,
+            )
+        state.pending_time_sync_epoch = None
+        state.pending_time_sync_reason = None
+        self._mark_running(state)
+
+    def _mark_running(self, state: ConnectionState) -> None:
+        state.phase = "running"
+        state.phase_deadline = 0.0
+        if not state.status_reported:
+            self._emit_status(state, "connected")
+            state.status_reported = True
+        self.start_scan()
+
+    def _check_daily_time_sync(self, now_utc: datetime | None = None) -> None:
+        """At each UTC date boundary, resync all eligible connected nodes."""
+        current = now_utc or datetime.now(timezone.utc)
+        current_date = current.astimezone(timezone.utc).date()
+        if current_date == self.utc_sync_date:
+            return
+
+        self.utc_sync_date = current_date
+        sync_epoch = int(current.timestamp())
+        LOG.info("UTC date changed to %s; resynchronizing connected nodes", current_date)
+        for state in list(self.connections.values()):
+            if state.phase != "running":
+                continue
+            self._start_time_sync(state, "utc_midnight", epoch=sync_epoch)
 
     def _next_envelope(self, state: ConnectionState, event_name: str, received_at: str) -> dict[str, Any]:
         self.sequence += 1

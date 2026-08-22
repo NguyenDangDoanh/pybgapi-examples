@@ -44,6 +44,22 @@ def _safe_int(value: Any) -> int | None:
         return None
 
 
+def _safe_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "1", "yes"):
+            return True
+        if normalized in ("false", "0", "no"):
+            return False
+    return None
+
+
 class EventProcessor:
     """Accept current nested schema plus the older flat test-message shape."""
 
@@ -124,6 +140,22 @@ class EventProcessor:
             "counter": _safe_int(raw.get("counter", parsed.get("event_counter"))),
             "node_event_timestamp": _safe_int(parsed.get("event_timestamp")),
             "timestamp_source": parsed.get("timestamp_source") or raw.get("timestamp_source") or "gateway_received",
+            "flags": _safe_int(raw.get("flags", parsed.get("flags"))),
+            "timestamp_valid": _safe_bool(
+                raw.get("timestamp_valid", parsed.get("timestamp_valid"))
+            ),
+            "stage2_valid": _safe_bool(
+                raw.get("stage2_valid", parsed.get("stage2_valid"))
+            ),
+            "prolonged": _safe_bool(
+                raw.get("prolonged", parsed.get("prolonged"))
+            ),
+            "duration_s": _safe_int(
+                raw.get(
+                    "duration_s",
+                    raw.get("duration_seconds", parsed.get("duration_s")),
+                )
+            ),
             "temperature_c": raw.get("temperature_c", parsed.get("temperature_c")),
             "humidity_percent": raw.get("humidity_percent", parsed.get("humidity_percent")),
             "temperature_x100": _safe_int(raw.get("temperature_x100", parsed.get("temperature_x100"))),
@@ -159,14 +191,7 @@ class EventProcessor:
             "connected",
             "online",
         )
-        previous = self.dao.get_device(item["device_id"])
-        was_online = bool(previous and previous.get("status") == "online")
         if connected:
-            # A real reconnect starts a fresh counter sequence. Clearing only
-            # on offline -> online avoids duplicate status messages resetting
-            # counter tracking during a healthy connection.
-            if not was_online:
-                self._clear_counter_state(item["device_id"])
             self.fleet.on_connect(
                 item["device_id"], item["received_ts"], **self._metadata(item)
             )
@@ -176,10 +201,6 @@ class EventProcessor:
             )
         if item.get("client_id"):
             self.dao.set_client(item["device_id"], str(item["client_id"]))
-
-    def _clear_counter_state(self, device_id: str) -> None:
-        for key in [key for key in self.last_counter if key[0] == device_id]:
-            self.last_counter.pop(key, None)
 
     def _process_cough(self, item: dict[str, Any]) -> None:
         self.fleet.touch(
@@ -231,6 +252,11 @@ class EventProcessor:
                 "event_counter": counter,
                 "node_event_timestamp": item.get("node_event_timestamp"),
                 "timestamp_source": item.get("timestamp_source"),
+                "flags": item.get("flags"),
+                "timestamp_valid": item.get("timestamp_valid"),
+                "stage2_valid": item.get("stage2_valid"),
+                "prolonged": item.get("prolonged"),
+                "duration_s": item.get("duration_s"),
                 "payload_hex": item.get("payload_hex"),
             }
         )

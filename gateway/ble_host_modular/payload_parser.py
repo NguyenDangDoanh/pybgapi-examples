@@ -8,6 +8,12 @@ from typing import Optional
 COUGH_EVENT_STRUCT = struct.Struct("<BBIH")
 ENVIRONMENT_STRUCT = struct.Struct("<hH")
 
+FLAG_TIMESTAMP_VALID = 1 << 0
+FLAG_STAGE2_VALID = 1 << 1
+FLAG_PROLONGED = 1 << 2
+DURATION_SHIFT = 3
+DURATION_MASK = 0x1F
+
 
 def parse_cough_payload(payload: bytes) -> Optional[dict[str, int | str]]:
     """Parse the 8-byte cough-event payload."""
@@ -26,6 +32,10 @@ def parse_cough_payload(payload: bytes) -> Optional[dict[str, int | str]]:
 
     return {
         "flags": flags,
+        "timestamp_valid": bool(flags & FLAG_TIMESTAMP_VALID),
+        "stage2_valid": bool(flags & FLAG_STAGE2_VALID),
+        "prolonged": bool(flags & FLAG_PROLONGED),
+        "duration_s": (flags >> DURATION_SHIFT) & DURATION_MASK,
         "cough_type": cough_type,
         "cough_type_name": cough_type_name,
         "event_timestamp": event_timestamp,

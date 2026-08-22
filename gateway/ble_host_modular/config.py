@@ -12,6 +12,7 @@ from constants import (
     DEFAULT_MAX_CONNECTIONS,
     DEFAULT_NAME_PREFIX,
     DEFAULT_SERVICE_UUID,
+    DEFAULT_TIME_UUID,
 )
 from utils import normalize_uuid
 
@@ -81,6 +82,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=DEFAULT_ENVIRONMENT_UUID,
         type=normalize_uuid,
         help="UUID of the environment-data characteristic.",
+    )
+    parser.add_argument(
+        "--time-uuid",
+        default=DEFAULT_TIME_UUID,
+        type=normalize_uuid,
+        help=(
+            "Optional writable uint32 Unix-time characteristic. Firmware "
+            "without this characteristic remains supported."
+        ),
     )
     parser.add_argument(
         "--backend-socket",

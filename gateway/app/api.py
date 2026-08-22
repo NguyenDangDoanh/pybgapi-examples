@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 from flask import Flask, abort, jsonify, request
 
 from .analytics import Analytics
 from .dao import Dao
 from .fleet import Fleet
-from .rules import Rules
 
 
 def _limit_arg(default: int = 50) -> int:
@@ -15,7 +16,13 @@ def _limit_arg(default: int = 50) -> int:
     return min(max(value or default, 1), 500)
 
 
-def create_app(dao: Dao, analytics: Analytics, rules: Rules, fleet: Fleet) -> Flask:
+def _optional_limit_arg() -> int | None:
+    if "limit" not in request.args:
+        return None
+    return _limit_arg()
+
+
+def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
     app = Flask(__name__)
 
     @app.get("/api/clients")
@@ -24,22 +31,80 @@ def create_app(dao: Dao, analytics: Analytics, rules: Rules, fleet: Fleet) -> Fl
 
     @app.get("/api/clients/<client_id>/events")
     def client_events(client_id: str):
-        return jsonify(
-            dao.get_events(
-                client_id=client_id,
-                start_time=request.args.get("from"),
-                end_time=request.args.get("to"),
+        order = request.args.get("order", "received").strip().lower()
+        query = {
+            "client_id": client_id,
+            "start_time": request.args.get("from"),
+            "end_time": request.args.get("to"),
+            "limit": _optional_limit_arg(),
+        }
+        if order == "event":
+            events = dao.get_events_by_occurrence(
+                **query,
+                descending=True,
             )
+        elif order == "received":
+            events = dao.get_events(**query)
+        else:
+            abort(400, description="order must be 'event' or 'received'")
+        return jsonify(events)
+
+    @app.get("/api/clients/<client_id>/events/page")
+    def client_event_page(client_id: str):
+        """Return occurrence-ordered events for a paginated dashboard table."""
+        page = max(request.args.get("page", 1, type=int) or 1, 1)
+        page_size = min(max(request.args.get("page_size", 25, type=int) or 25, 1), 100)
+        start_time = request.args.get("from")
+        end_time = request.args.get("to")
+        items = dao.get_events_by_occurrence(
+            client_id=client_id,
+            start_time=start_time,
+            end_time=end_time,
+            limit=page_size,
+            descending=True,
+            offset=(page - 1) * page_size,
+        )
+        total = dao.count_events_by_occurrence(
+            client_id=client_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        return jsonify(
+            {
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
         )
 
     @app.get("/api/clients/<client_id>/stats")
     def client_stats(client_id: str):
-        stats = analytics.get_client_stats(client_id)
-        stats["suggestions"] = [
-            {"rule": suggestion.rule, "text": suggestion.text}
-            for suggestion in rules.evaluate(client_id)
-        ]
-        return jsonify(stats)
+        return jsonify(analytics.get_client_stats(client_id))
+
+    @app.get("/api/clients/<client_id>/treatment")
+    def get_client_treatment(client_id: str):
+        return jsonify(dao.get_client_settings(client_id))
+
+    @app.put("/api/clients/<client_id>/treatment")
+    def set_client_treatment(client_id: str):
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or "treatment_start_date" not in data:
+            abort(400, description="Body must contain treatment_start_date")
+        treatment_start_date = data["treatment_start_date"]
+        if treatment_start_date is not None:
+            if not isinstance(treatment_start_date, str):
+                abort(400, description="treatment_start_date must be YYYY-MM-DD or null")
+            treatment_start_date = treatment_start_date.strip()
+            try:
+                treatment_start_date = date.fromisoformat(
+                    treatment_start_date
+                ).isoformat()
+            except ValueError:
+                abort(400, description="treatment_start_date must be YYYY-MM-DD or null")
+        return jsonify(
+            dao.set_treatment_start_date(client_id, treatment_start_date)
+        )
 
     @app.get("/api/devices")
     def list_devices():

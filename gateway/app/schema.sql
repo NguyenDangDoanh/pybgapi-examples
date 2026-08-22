@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS cough_events (
     event_counter        INTEGER,
     node_event_timestamp INTEGER,
     timestamp_source     TEXT,
+    flags                INTEGER,
+    timestamp_valid      INTEGER,
+    stage2_valid         INTEGER,
+    prolonged            INTEGER,
+    duration_s           INTEGER,
     payload_hex          TEXT,
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
 );
@@ -39,3 +44,12 @@ CREATE TABLE IF NOT EXISTS environment_readings (
     payload_hex         TEXT,
     FOREIGN KEY (device_id) REFERENCES devices(device_id)
 );
+
+CREATE TABLE IF NOT EXISTS client_settings (
+    client_id            TEXT PRIMARY KEY,
+    treatment_start_date TEXT,
+    updated_at           TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_cough_client_event
+    ON cough_events(client_id, event_ts DESC);

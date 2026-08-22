@@ -46,6 +46,44 @@ provides a detailed description how NCP works and how to configure it for CPC an
 
 For the latest BGAPI documentation, see [docs.silabs.com](https://docs.silabs.com/bluetooth/latest/).
 
+## BreathSense gateway time synchronization
+
+The multi-node gateway in [`gateway/ble_host_modular`](gateway/ble_host_modular)
+supports both legacy and time-aware xG26 firmware. The Cough Event wire payload
+remains exactly 8 bytes, little-endian `<BBIH>` (`flags`, `cough_type`, Unix
+`event_ts`, and uint16 `event_counter`). Legacy firmware sends `event_ts = 0`,
+so the Pi uses `received_ts`; extended firmware sends `event_ts > 0`, which is
+used as the event time.
+
+The same payload also carries cough-bout metadata in `flags`: synchronized
+timestamp, Stage 2 confidence, prolonged status, and an estimated duration up
+to 31 seconds. The gateway stores these fields and presents prolonged bouts as
+monitoring events requiring observation, never as a medical diagnosis.
+
+Extended firmware may add the writable Time characteristic
+`b5e00004-7a4b-4c6d-9e10-112233445566` to the existing BreathSense service.
+After notifications are enabled, the Pi writes a little-endian uint32 Unix
+epoch on every connect/reconnect and resynchronizes all connected nodes at each
+UTC midnight. Absence of the Time characteristic is explicitly supported and
+does not interrupt the legacy discovery/notification flow.
+
+See [the gateway timestamp and firmware contract](gateway/README.md#time-synchronization-contract)
+for the UUID table, reconnect ordering, monotonic-clock requirements, offline
+buffer format, and counter semantics.
+
+The dashboard treats `event_ts` as the patient's timeline. Its 24-hour view is
+a rolling wall-clock window with aligned 30-minute type stacks; its 7-day view
+uses the seven completed local dates before today with Day/Night stacks and a
+single baseline overlay. Delayed `received_ts` values remain audit-only and
+cannot move buffered coughs to reconnect time. Cough events are also ordered
+by event time. See [current data flow and timestamp
+responsibilities](gateway/README.md#current-data-flow-and-timestamp-responsibilities)
+for the complete ingest, storage, API, analytics, and dashboard behavior.
+
+The dashboard also keeps the existing EWMA abnormal-day finding and provides a
+separate automatic weekly [treatment-response comparison](gateway/README.md#treatment-response)
+starting from each patient's first valid data day.
+
 ## Generic Application Classes
 
 All example applications in this repo are based on the generic application classes. These classes
