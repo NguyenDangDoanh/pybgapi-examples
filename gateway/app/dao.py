@@ -207,6 +207,7 @@ class Dao:
         end_time: str | None = None,
         limit: int | None = None,
         descending: bool = False,
+        offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Return cough bouts filtered by their captured occurrence time.
 
@@ -226,8 +227,30 @@ class Dao:
         if limit is not None:
             sql += " LIMIT ?"
             params.append(self._clamp_limit(limit))
+            if offset:
+                sql += " OFFSET ?"
+                params.append(max(int(offset), 0))
         with self._lock:
             return self._rows(self._get_conn().execute(sql, params))
+
+    def count_events_by_occurrence(
+        self,
+        client_id: str,
+        start_time: str | None = None,
+        end_time: str | None = None,
+    ) -> int:
+        """Count patient events in an occurrence-time range."""
+        sql = "SELECT COUNT(*) FROM cough_events WHERE client_id = ?"
+        params: list[object] = [client_id]
+        if start_time is not None:
+            sql += " AND event_ts >= ?"
+            params.append(start_time)
+        if end_time is not None:
+            sql += " AND event_ts <= ?"
+            params.append(end_time)
+        with self._lock:
+            row = self._get_conn().execute(sql, params).fetchone()
+        return int(row[0]) if row is not None else 0
 
     def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         limit = self._clamp_limit(limit)

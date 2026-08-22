@@ -15,7 +15,7 @@ except ZoneInfoNotFoundError:
     DISPLAY_TIMEZONE = ZoneInfo("UTC")
 
 DAY_START_HOUR = 6
-NIGHT_START_HOUR = 18
+NIGHT_START_HOUR = 22
 
 
 def _parse_ts(value: str | None) -> datetime | None:
@@ -83,6 +83,20 @@ def _ten_minute_key(occurred: datetime) -> str:
     return bucket.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
+def _thirty_minute_start(occurred: datetime) -> datetime:
+    """Floor a local timestamp to a clock-aligned :00/:30 bucket."""
+    return occurred.replace(
+        minute=(occurred.minute // 30) * 30,
+        second=0,
+        microsecond=0,
+    )
+
+
+def _type_name(event: dict) -> str:
+    cough_type = str(event.get("cough_type") or "unknown").lower()
+    return cough_type if cough_type in {"dry", "wet", "unknown"} else "unknown"
+
+
 class Analytics:
     """Compute occurrence-time bout trends independently for each client."""
 
@@ -92,31 +106,34 @@ class Analytics:
     def get_client_stats(
         self, client_id: str, now: datetime | None = None
     ) -> dict:
-        occurrence_events = self.dao.get_events_by_occurrence(
+        latest_events = self.dao.get_events_by_occurrence(
             client_id=client_id,
             limit=1,
             descending=True,
         )
         last_event_ts = (
-            occurrence_events[0].get("event_ts") if occurrence_events else None
+            latest_events[0].get("event_ts") if latest_events else None
         )
+        first_events = self.dao.get_events_by_occurrence(
+            client_id=client_id,
+            limit=1,
+        )
+        first_event = first_events[0] if first_events else None
+        first_event_local = _parse_ts(first_event.get("event_ts")) if first_event else None
+        first_data_date = first_event_local.date() if first_event_local else None
         transport_events = self.dao.get_events(client_id=client_id, limit=1)
         last_received_ts = (
             transport_events[0].get("received_ts") if transport_events else None
         )
-        if now is None and last_event_ts:
-            parsed_anchor = _parse_ts(last_event_ts)
-            now_utc = (
-                parsed_anchor.astimezone(timezone.utc)
-                if parsed_anchor is not None
-                else _as_utc(None)
-            )
-        else:
-            now_utc = _as_utc(now)
+        # A quiet period is clinically meaningful monitoring time.  The rolling
+        # window therefore follows wall-clock time rather than the last cough.
+        now_utc = _as_utc(now)
         local_now = now_utc.astimezone(DISPLAY_TIMEZONE)
         start_24h = now_utc - timedelta(hours=24)
-        start_7d = _local_midnight_utc(local_now.date() - timedelta(days=6))
-        start_hour_history = now_utc - timedelta(days=7)
+        seven_day_start = local_now.date() - timedelta(days=7)
+        seven_day_end = local_now.date() - timedelta(days=1)
+        start_7d = _local_midnight_utc(seven_day_start)
+        end_7d_exclusive = _local_midnight_utc(local_now.date())
 
         events_24h = self.dao.get_events_by_occurrence(
             client_id=client_id,
@@ -126,12 +143,7 @@ class Analytics:
         events_7d = self.dao.get_events_by_occurrence(
             client_id=client_id,
             start_time=_iso_utc(start_7d),
-            end_time=_iso_utc(now_utc),
-        )
-        events_hour_history = self.dao.get_events_by_occurrence(
-            client_id=client_id,
-            start_time=_iso_utc(start_hour_history),
-            end_time=_iso_utc(now_utc),
+            end_time=_iso_utc(end_7d_exclusive - timedelta(milliseconds=1)),
         )
 
         hourly_map: defaultdict[str, int] = defaultdict(int)
@@ -142,28 +154,70 @@ class Analytics:
                 hourly_map[occurred.strftime("%Y-%m-%dT%H:00:00%z")] += 1
                 ten_minute_map[_ten_minute_key(occurred)] += 1
 
-        daily_map: defaultdict[str, int] = defaultdict(int)
+        bucket_cursor = _thirty_minute_start(
+            start_24h.astimezone(DISPLAY_TIMEZONE)
+        )
+        bucket_end = _thirty_minute_start(local_now)
+        thirty_minute_map: dict[str, dict[str, int | str]] = {}
+        while bucket_cursor <= bucket_end:
+            key = bucket_cursor.strftime("%Y-%m-%dT%H:%M:%S%z")
+            thirty_minute_map[key] = {
+                "ts": key,
+                "dry": 0,
+                "wet": 0,
+                "unknown": 0,
+                "total": 0,
+            }
+            bucket_cursor += timedelta(minutes=30)
+        for event in events_24h:
+            occurred = _parse_ts(event.get("event_ts"))
+            if occurred is None:
+                continue
+            key = _thirty_minute_start(occurred).strftime(
+                "%Y-%m-%dT%H:%M:%S%z"
+            )
+            bucket = thirty_minute_map.get(key)
+            if bucket is None:
+                continue
+            cough_type = _type_name(event)
+            bucket[cough_type] = int(bucket[cough_type]) + 1
+            bucket["total"] = int(bucket["total"]) + 1
+
+        daily_map: dict[date, dict[str, int | str]] = {}
+        display_start = seven_day_start
+        if first_data_date is not None and first_data_date > display_start:
+            display_start = first_data_date
+        cursor = display_start
+        while cursor <= seven_day_end:
+            daily_map[cursor] = {
+                "date": cursor.isoformat(),
+                "day": 0,
+                "night": 0,
+                "dry": 0,
+                "wet": 0,
+                "unknown": 0,
+                "total": 0,
+            }
+            cursor += timedelta(days=1)
         for event in events_7d:
             occurred = _parse_ts(event.get("event_ts"))
-            if occurred is not None:
-                daily_map[occurred.strftime("%Y-%m-%d")] += 1
-
-        hourly_history_map: defaultdict[str, int] = defaultdict(int)
-        ten_minute_history_map: defaultdict[str, int] = defaultdict(int)
-        for event in events_hour_history:
-            occurred = _parse_ts(event.get("event_ts"))
-            if occurred is not None:
-                hourly_history_map[
-                    occurred.strftime("%Y-%m-%dT%H:00:00%z")
-                ] += 1
-                ten_minute_history_map[_ten_minute_key(occurred)] += 1
+            if occurred is None or occurred.date() not in daily_map:
+                continue
+            item = daily_map[occurred.date()]
+            cough_type = _type_name(event)
+            period = (
+                "day"
+                if DAY_START_HOUR <= occurred.hour < NIGHT_START_HOUR
+                else "night"
+            )
+            item[cough_type] = int(item[cough_type]) + 1
+            item[period] = int(item[period]) + 1
+            item["total"] = int(item["total"]) + 1
 
         all_events = self.dao.get_events(client_id=client_id)
         baseline = self.ewma_baseline_status(client_id, now=now_utc)
-        client_settings = self.dao.get_client_settings(client_id)
         treatment_response = self.treatment_response_status(
             client_id,
-            treatment_start_date=client_settings.get("treatment_start_date"),
             now=now_utc,
         )
 
@@ -185,17 +239,17 @@ class Analytics:
                 {"ts": key, "count": value}
                 for key, value in sorted(ten_minute_map.items())
             ],
-            "per_day": [
-                {"date": key, "count": value}
-                for key, value in sorted(daily_map.items())
-            ],
+            "per_30_minute": list(thirty_minute_map.values()),
+            "per_day": list(daily_map.values()),
+            # Deprecated aliases retained for older API consumers.  The
+            # dashboard itself uses per_30_minute and per_day above.
             "per_hour_history": [
                 {"ts": key, "count": value}
-                for key, value in sorted(hourly_history_map.items())
+                for key, value in sorted(hourly_map.items())
             ],
             "per_10_minute_history": [
                 {"ts": key, "count": value}
-                for key, value in sorted(ten_minute_history_map.items())
+                for key, value in sorted(ten_minute_map.items())
             ],
             "last_24h_count": len(events_24h),
             "last_7d_count": len(events_7d),
@@ -207,6 +261,14 @@ class Analytics:
             "baseline": baseline,
             "treatment_response": treatment_response,
             "last_event_ts": last_event_ts,
+            "first_data_date": (
+                first_data_date.isoformat() if first_data_date is not None else None
+            ),
+            "completed_7d_available": len(daily_map) == 7,
+            "window_24h_start": _iso_utc(start_24h),
+            "window_24h_end": _iso_utc(now_utc),
+            "window_7d_start": seven_day_start.isoformat(),
+            "window_7d_end": seven_day_end.isoformat(),
             # Transport receipt remains available to API consumers for audit
             # and reconnect diagnostics, but does not drive patient analytics.
             "last_received_ts": last_received_ts,
@@ -216,45 +278,46 @@ class Analytics:
     def treatment_response_status(
         self,
         client_id: str,
-        treatment_start_date: str | None,
+        treatment_start_date: str | None = None,
         warmup_days: int = 7,
         now: datetime | None = None,
     ) -> dict:
-        """Compare the latest completed treatment day with prior full days.
+        """Compare completed seven-day treatment weeks.
 
-        The first local calendar day containing data is conservatively treated
-        as partial. Every later completed calendar day is included, including
-        zero-bout days under the project's continuous-monitoring assumption.
-        The current day is never compared with a baseline that contains itself;
-        once completed, it joins the expanding baseline for the following day.
+        Treatment Day 1 is the first valid recorded local day.  Week 1 builds
+        the initial baseline.  Week 2 is compared with Week 1, while Week 3+
+        use every completed prior treatment day as the expanding personal
+        baseline.  A partial current week is never compared quantitatively.
+
+        ``treatment_start_date`` is retained as a deprecated call-compatible
+        argument but is intentionally ignored; the start is data-derived.
         """
         if warmup_days <= 0:
             raise ValueError("warmup_days must be positive")
 
         base = {
             "client_id": client_id,
-            "treatment_start_date": treatment_start_date,
+            "treatment_start_date": None,
+            "first_data_date": None,
             "warmup_days": warmup_days,
             "available": False,
             "baseline": None,
             "current": None,
-            "current_date": None,
             "change_percent": None,
             "direction": None,
             "baseline_days": 0,
             "warmup_remaining": warmup_days,
+            "current_week_number": None,
+            "current_week_start": None,
+            "current_week_end": None,
+            "current_week_complete": False,
+            "evaluation_week_number": None,
+            "evaluation_week_start": None,
+            "evaluation_week_end": None,
         }
-        if not treatment_start_date:
-            return {**base, "reason": "treatment_not_set"}
-        try:
-            treatment_day = date.fromisoformat(str(treatment_start_date))
-        except (TypeError, ValueError):
-            return {**base, "reason": "invalid_treatment_date"}
 
         now_utc = _as_utc(now)
-        completed_through = (
-            now_utc.astimezone(DISPLAY_TIMEZONE).date() - timedelta(days=1)
-        )
+        local_today = now_utc.astimezone(DISPLAY_TIMEZONE).date()
         events = self.dao.get_events_by_occurrence(
             client_id=client_id,
             end_time=_iso_utc(now_utc),
@@ -267,53 +330,63 @@ class Analytics:
         if not dated_events:
             return {**base, "reason": "no_data"}
 
-        # We cannot prove that monitoring covered the part of the first day
-        # before the first event, so full-day accounting begins the next day.
-        first_full_day = min(day for day, _event in dated_events) + timedelta(days=1)
-        if first_full_day > completed_through:
-            return {**base, "reason": "no_completed_day"}
-
+        first_data_day = min(day for day, _event in dated_events)
+        treatment_span_days = max((local_today - first_data_day).days, 0)
+        current_week_number = treatment_span_days // 7 + 1
+        current_week_start = first_data_day + timedelta(
+            days=(current_week_number - 1) * 7
+        )
+        current_week_end = current_week_start + timedelta(days=6)
+        completed_week_count = treatment_span_days // 7
+        automatic = {
+            **base,
+            "treatment_start_date": first_data_day.isoformat(),
+            "first_data_date": first_data_day.isoformat(),
+            "current_week_number": current_week_number,
+            "current_week_start": current_week_start.isoformat(),
+            "current_week_end": current_week_end.isoformat(),
+        }
         counts: defaultdict[date, int] = defaultdict(int)
         for day, _event in dated_events:
-            if first_full_day <= day <= completed_through:
+            if first_data_day <= day < local_today:
                 counts[day] += 1
 
-        completed_days: list[dict] = []
-        cursor = first_full_day
-        while cursor <= completed_through:
-            completed_days.append({"date": cursor, "count": counts[cursor]})
-            cursor += timedelta(days=1)
-
-        treatment_days = [
-            item for item in completed_days if item["date"] >= treatment_day
-        ]
-        if not treatment_days:
+        if completed_week_count == 0:
+            completed_days = min(treatment_span_days, 7)
             return {
-                **base,
-                "completed_days": len(completed_days),
-                "reason": "awaiting_completed_treatment_day",
+                **automatic,
+                "baseline_days": completed_days,
+                "warmup_remaining": max(7 - completed_days, 0),
+                "reason": "warmup",
             }
 
-        current_day = treatment_days[-1]
-        baseline_days = [
-            item for item in completed_days if item["date"] < current_day["date"]
-        ]
-        remaining = max(warmup_days - len(baseline_days), 0)
-        pending = {
-            **base,
-            "current": int(current_day["count"]),
-            "current_date": current_day["date"].isoformat(),
-            "baseline_days": len(baseline_days),
-            "completed_days": len(completed_days),
-            "warmup_remaining": remaining,
-        }
-        if remaining:
-            return {**pending, "reason": "warmup"}
+        if completed_week_count == 1:
+            week_one_total = sum(
+                counts[first_data_day + timedelta(days=offset)]
+                for offset in range(7)
+            )
+            return {
+                **automatic,
+                "baseline": round(week_one_total / 7.0, 2),
+                "baseline_days": 7,
+                "warmup_remaining": 0,
+                "reason": "awaiting_completed_comparison_week",
+            }
 
-        cumulative_baseline = sum(
-            int(item["count"]) for item in baseline_days
-        ) / len(baseline_days)
-        current_count = int(current_day["count"])
+        evaluation_week = completed_week_count
+        evaluation_start = first_data_day + timedelta(days=(evaluation_week - 1) * 7)
+        evaluation_end = evaluation_start + timedelta(days=6)
+        baseline_days = (evaluation_week - 1) * 7
+        baseline_total = sum(
+            counts[first_data_day + timedelta(days=offset)]
+            for offset in range(baseline_days)
+        )
+        evaluation_total = sum(
+            counts[evaluation_start + timedelta(days=offset)]
+            for offset in range(7)
+        )
+        cumulative_baseline = baseline_total / baseline_days
+        current_count = evaluation_total / 7.0
         change_percent = (
             ((current_count - cumulative_baseline) / cumulative_baseline) * 100.0
             if cumulative_baseline > 0
@@ -327,9 +400,15 @@ class Analytics:
             direction = "unchanged"
 
         return {
-            **pending,
+            **automatic,
             "available": True,
             "baseline": round(cumulative_baseline, 2),
+            "current": round(current_count, 2),
+            "baseline_days": baseline_days,
+            "warmup_remaining": 0,
+            "evaluation_week_number": evaluation_week,
+            "evaluation_week_start": evaluation_start.isoformat(),
+            "evaluation_week_end": evaluation_end.isoformat(),
             "change_percent": (
                 round(change_percent, 1) if change_percent is not None else None
             ),
@@ -445,6 +524,9 @@ class Analytics:
             "alpha": alpha,
             "threshold_pct": threshold_pct,
             "min_buffer": min_buffer,
+            "updated_through": (
+                completed_days[-1]["date"] if completed_days else None
+            ),
         }
 
         if len(completed_days) < warmup_days:

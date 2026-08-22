@@ -49,6 +49,35 @@ def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
             abort(400, description="order must be 'event' or 'received'")
         return jsonify(events)
 
+    @app.get("/api/clients/<client_id>/events/page")
+    def client_event_page(client_id: str):
+        """Return occurrence-ordered events for a paginated dashboard table."""
+        page = max(request.args.get("page", 1, type=int) or 1, 1)
+        page_size = min(max(request.args.get("page_size", 25, type=int) or 25, 1), 100)
+        start_time = request.args.get("from")
+        end_time = request.args.get("to")
+        items = dao.get_events_by_occurrence(
+            client_id=client_id,
+            start_time=start_time,
+            end_time=end_time,
+            limit=page_size,
+            descending=True,
+            offset=(page - 1) * page_size,
+        )
+        total = dao.count_events_by_occurrence(
+            client_id=client_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        return jsonify(
+            {
+                "items": items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
+
     @app.get("/api/clients/<client_id>/stats")
     def client_stats(client_id: str):
         return jsonify(analytics.get_client_stats(client_id))

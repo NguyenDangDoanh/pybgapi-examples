@@ -9,9 +9,10 @@ import threading
 import tempfile
 import types
 import unittest
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -336,53 +337,57 @@ class AnalyticsTest(unittest.TestCase):
         stats = self.analytics.get_client_stats(self.client_id, now=now)
 
         self.assertEqual(2, stats["last_24h_count"])
-        self.assertEqual(3, stats["last_7d_count"])
+        # The seven-day view contains completed local calendar days only, so
+        # today's two bouts do not appear there.
+        self.assertEqual(1, stats["last_7d_count"])
         self.assertEqual(
             {"wet": 1, "dry": 0, "unknown": 1}, stats["by_type_24h"]
         )
         self.assertEqual(
-            {"wet": 1, "dry": 1, "unknown": 1}, stats["by_type_7d"]
+            {"wet": 0, "dry": 1, "unknown": 0}, stats["by_type_7d"]
         )
         self.assertEqual({"day": 1, "night": 1}, stats["day_night_24h"])
 
-    def test_24h_trend_uses_ten_minute_buckets(self) -> None:
+    def test_24h_trend_uses_stacked_clock_aligned_thirty_minute_buckets(self) -> None:
         now = datetime(2026, 8, 14, 4, 7, tzinfo=timezone.utc)
         # 11:01 and 11:07 local share one bucket; 10:59 is the prior bucket.
-        self._insert(now - timedelta(minutes=8), now - timedelta(minutes=8))
-        self._insert(now - timedelta(minutes=6), now - timedelta(minutes=6))
-        self._insert(now, now)
+        self._insert(now - timedelta(minutes=8), now - timedelta(minutes=8), "dry")
+        self._insert(now - timedelta(minutes=6), now - timedelta(minutes=6), "wet")
+        self._insert(now, now, "unknown")
 
         stats = self.analytics.get_client_stats(self.client_id, now=now)
 
+        nonzero = [item for item in stats["per_30_minute"] if item["total"]]
+        self.assertEqual(2, len(nonzero))
+        self.assertIn("T10:30:00+0700", nonzero[0]["ts"])
         self.assertEqual(
-            [1, 2],
-            [item["count"] for item in stats["per_10_minute"]],
+            {"dry": 1, "wet": 0, "unknown": 0, "total": 1},
+            {key: nonzero[0][key] for key in ("dry", "wet", "unknown", "total")},
         )
-        self.assertTrue(stats["per_10_minute"][0]["ts"].endswith("+0700"))
-        self.assertIn("T11:00:00+0700", stats["per_10_minute"][1]["ts"])
-
-    def test_default_24h_window_ends_at_latest_event_time(self) -> None:
-        last_event = datetime(2026, 8, 5, 8, 0, tzinfo=timezone.utc)
-        delayed_reconnect = datetime(2026, 8, 5, 12, 0, tzinfo=timezone.utc)
-        self._insert(
-            last_event - timedelta(hours=25),
-            delayed_reconnect,
-            "dry",
+        self.assertIn("T11:00:00+0700", nonzero[1]["ts"])
+        self.assertEqual(
+            {"dry": 0, "wet": 1, "unknown": 1, "total": 2},
+            {key: nonzero[1][key] for key in ("dry", "wet", "unknown", "total")},
         )
-        self._insert(
-            last_event - timedelta(hours=1),
-            last_event + timedelta(seconds=1),
-            "wet",
-        )
-        self._insert(last_event, last_event + timedelta(seconds=2), "dry")
+        self.assertIn(len(stats["per_30_minute"]), (48, 49))
 
-        stats = self.analytics.get_client_stats(self.client_id)
+    def test_default_24h_window_uses_wall_clock_not_latest_event(self) -> None:
+        now = datetime(2026, 8, 6, 8, 0, tzinfo=timezone.utc)
+        last_event = now - timedelta(hours=2)
+        delayed_reconnect = now
+        self._insert(now - timedelta(hours=26), delayed_reconnect, "dry")
+        self._insert(now - timedelta(hours=3), now - timedelta(hours=2), "wet")
+        self._insert(last_event, now - timedelta(hours=1), "dry")
 
-        self.assertEqual(self._iso(last_event), stats["analysis_anchor_ts"])
+        stats = self.analytics.get_client_stats(self.client_id, now=now)
+
+        self.assertEqual(self._iso(now), stats["analysis_anchor_ts"])
+        self.assertEqual(self._iso(now - timedelta(hours=24)), stats["window_24h_start"])
+        self.assertEqual(self._iso(now), stats["window_24h_end"])
         self.assertEqual(self._iso(last_event), stats["last_event_ts"])
         self.assertEqual(self._iso(delayed_reconnect), stats["last_received_ts"])
         self.assertEqual(2, stats["last_24h_count"])
-        self.assertEqual(3, sum(item["count"] for item in stats["per_hour_history"]))
+        self.assertEqual(2, sum(item["count"] for item in stats["per_hour_history"]))
 
         live_feed = self.dao.get_events_by_occurrence(
             self.client_id, limit=2, descending=True
@@ -391,6 +396,50 @@ class AnalyticsTest(unittest.TestCase):
             [self._iso(last_event), self._iso(last_event - timedelta(hours=1))],
             [event["event_ts"] for event in live_feed],
         )
+
+    def test_occurrence_event_pagination_is_newest_first_and_counted(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        for offset in range(6):
+            occurred = now - timedelta(minutes=offset)
+            self._insert(occurred, occurred)
+
+        second_page = self.dao.get_events_by_occurrence(
+            self.client_id,
+            limit=2,
+            descending=True,
+            offset=2,
+        )
+
+        self.assertEqual(6, self.dao.count_events_by_occurrence(self.client_id))
+        self.assertEqual(
+            [self._iso(now - timedelta(minutes=2)), self._iso(now - timedelta(minutes=3))],
+            [event["event_ts"] for event in second_page],
+        )
+
+    def test_seven_day_view_uses_completed_days_and_day_starts_at_six(self) -> None:
+        now = datetime(2026, 8, 22, 5, 0, tzinfo=timezone.utc)  # local noon
+        for offset in range(7, 0, -1):
+            local_day = now.astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).date() - timedelta(days=offset)
+            day_event = datetime.combine(
+                local_day, time(6, 0), ZoneInfo("Asia/Ho_Chi_Minh")
+            )
+            night_event = datetime.combine(
+                local_day, time(22, 0), ZoneInfo("Asia/Ho_Chi_Minh")
+            )
+            self._insert(day_event, day_event, "dry")
+            self._insert(night_event, night_event, "wet")
+        self._insert(now, now, "unknown")  # today is excluded from 7d
+
+        stats = self.analytics.get_client_stats(self.client_id, now=now)
+
+        self.assertTrue(stats["completed_7d_available"])
+        self.assertEqual(7, len(stats["per_day"]))
+        self.assertEqual(14, stats["last_7d_count"])
+        # The prior completed day's 22:00 night event is also within the
+        # rolling wall-clock window.
+        self.assertEqual(2, stats["last_24h_count"])
+        self.assertTrue(all(item["day"] == 1 for item in stats["per_day"]))
+        self.assertTrue(all(item["night"] == 1 for item in stats["per_day"]))
 
     def test_ewma_warmup_threshold_and_continuing_update(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
@@ -450,48 +499,28 @@ class AnalyticsTest(unittest.TestCase):
         cleared = self.dao.set_treatment_start_date(self.client_id, None)
         self.assertIsNone(cleared["treatment_start_date"])
 
-    def test_treatment_response_uses_prior_expanding_full_days(self) -> None:
-        # UTC 05:00 is local noon. August 1 is excluded as the conservative
-        # partial first day; August 2-8 form the initial seven-day baseline.
-        self._insert(
-            datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc),
-            datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc),
-        )
-        for day_number, count in zip(range(2, 9), (10, 20, 30, 40, 50, 60, 70)):
-            occurred = datetime(
-                2026, 8, day_number, 5, 0, tzinfo=timezone.utc
-            )
-            for _ in range(count):
+    def test_treatment_response_uses_automatic_completed_weeks(self) -> None:
+        for day_number in range(1, 8):
+            occurred = datetime(2026, 8, day_number, 5, 0, tzinfo=timezone.utc)
+            for _ in range(10):
                 self._insert(occurred, occurred)
-        day_nine = datetime(2026, 8, 9, 5, 0, tzinfo=timezone.utc)
-        for _ in range(80):
-            self._insert(day_nine, day_nine)
+        for day_number in range(8, 15):
+            occurred = datetime(2026, 8, day_number, 5, 0, tzinfo=timezone.utc)
+            for _ in range(5):
+                self._insert(occurred, occurred)
 
-        initial = self.analytics.treatment_response_status(
+        status = self.analytics.treatment_response_status(
             self.client_id,
-            "2026-08-09",
-            now=datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc),
         )
-        self.assertTrue(initial["available"])
-        self.assertEqual(7, initial["baseline_days"])
-        self.assertEqual(40.0, initial["baseline"])
-        self.assertEqual(80, initial["current"])
-        self.assertEqual(100.0, initial["change_percent"])
-        self.assertEqual("increased", initial["direction"])
-
-        day_ten = datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc)
-        for _ in range(20):
-            self._insert(day_ten, day_ten)
-        expanded = self.analytics.treatment_response_status(
-            self.client_id,
-            "2026-08-09",
-            now=datetime(2026, 8, 11, 5, 0, tzinfo=timezone.utc),
-        )
-        self.assertEqual(8, expanded["baseline_days"])
-        self.assertEqual(45.0, expanded["baseline"])
-        self.assertEqual(20, expanded["current"])
-        self.assertEqual(-55.6, expanded["change_percent"])
-        self.assertEqual("decreased", expanded["direction"])
+        self.assertTrue(status["available"])
+        self.assertEqual("2026-08-01", status["first_data_date"])
+        self.assertEqual(2, status["evaluation_week_number"])
+        self.assertEqual(7, status["baseline_days"])
+        self.assertEqual(10.0, status["baseline"])
+        self.assertEqual(5.0, status["current"])
+        self.assertEqual(-50.0, status["change_percent"])
+        self.assertEqual("decreased", status["direction"])
 
     def test_treatment_response_counts_completed_zero_days(self) -> None:
         first = datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc)
@@ -502,13 +531,12 @@ class AnalyticsTest(unittest.TestCase):
 
         status = self.analytics.treatment_response_status(
             self.client_id,
-            "2026-08-09",
-            now=datetime(2026, 8, 10, 5, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc),
         )
         self.assertTrue(status["available"])
         self.assertEqual(7, status["baseline_days"])
-        self.assertEqual(1.0, status["baseline"])
-        self.assertEqual(0, status["current"])
+        self.assertEqual(1.14, status["baseline"])
+        self.assertEqual(0.0, status["current"])
         self.assertEqual(-100.0, status["change_percent"])
 
     def test_treatment_response_keeps_separate_seven_day_warmup(self) -> None:
@@ -520,13 +548,12 @@ class AnalyticsTest(unittest.TestCase):
 
         status = self.analytics.treatment_response_status(
             self.client_id,
-            "2026-08-04",
             now=datetime(2026, 8, 6, 5, 0, tzinfo=timezone.utc),
         )
         self.assertFalse(status["available"])
         self.assertEqual("warmup", status["reason"])
-        self.assertEqual(3, status["baseline_days"])
-        self.assertEqual(4, status["warmup_remaining"])
+        self.assertEqual(5, status["baseline_days"])
+        self.assertEqual(2, status["warmup_remaining"])
 
 
 class DemoDataTest(unittest.TestCase):
@@ -542,7 +569,7 @@ class DemoDataTest(unittest.TestCase):
                 warmup = analytics.get_client_stats(WARMUP_CLIENT, now=now)
 
                 self.assertTrue(first["created"])
-                self.assertEqual(123, first["events"])
+                self.assertEqual(219, first["events"])
                 self.assertEqual(22, above["today_count"])
                 self.assertTrue(above["baseline"]["available"])
                 self.assertTrue(above["baseline"]["above_baseline"])

@@ -71,16 +71,18 @@ See [the gateway timestamp and firmware contract](gateway/README.md#time-synchro
 for the UUID table, reconnect ordering, monotonic-clock requirements, offline
 buffer format, and counter semantics.
 
-The dashboard treats `event_ts` as the patient's timeline. Its 24-hour view
-ends at the selected patient's latest cough event, while delayed `received_ts`
-values remain audit-only and cannot move buffered coughs to reconnect time.
-Live Feed is also ordered by event time. See [current data flow and timestamp
+The dashboard treats `event_ts` as the patient's timeline. Its 24-hour view is
+a rolling wall-clock window with aligned 30-minute type stacks; its 7-day view
+uses the seven completed local dates before today with Day/Night stacks and a
+single baseline overlay. Delayed `received_ts` values remain audit-only and
+cannot move buffered coughs to reconnect time. Cough events are also ordered
+by event time. See [current data flow and timestamp
 responsibilities](gateway/README.md#current-data-flow-and-timestamp-responsibilities)
 for the complete ingest, storage, API, analytics, and dashboard behavior.
 
 The dashboard also keeps the existing EWMA abnormal-day finding and provides a
-separate, optional cumulative [treatment-response comparison](gateway/README.md#treatment-response)
-using one start-date marker per patient.
+separate automatic weekly [treatment-response comparison](gateway/README.md#treatment-response)
+starting from each patient's first valid data day.
 
 ## Generic Application Classes
 

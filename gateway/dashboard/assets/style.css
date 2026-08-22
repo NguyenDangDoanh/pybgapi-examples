@@ -107,7 +107,7 @@ body {
 }
 
 .primary-kpi strong {
-    font-size: 36px;
+    font-size: 32px;
     line-height: 1.05;
     letter-spacing: -0.04em;
 }
@@ -139,40 +139,9 @@ body {
 }
 
 .chart {
-    flex: 2 1 480px;
+    flex: 1 1 100%;
+    width: 100%;
     min-width: 0;
-}
-
-.chart-narrow {
-    flex: 1 1 280px;
-}
-
-.day-night-row {
-    display: flex;
-    gap: 12px;
-    margin-top: 2px;
-}
-
-.period-stat {
-    min-width: 125px;
-    padding: 11px 14px;
-    border: 1px solid #e1e0d9;
-    border-radius: 8px;
-    background: #f9f9f7;
-}
-
-.period-stat span {
-    display: block;
-    color: #77756f;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-}
-
-.period-stat strong {
-    display: block;
-    margin-top: 2px;
-    font-size: 21px;
 }
 
 .baseline-card {
@@ -214,31 +183,11 @@ body {
 }
 
 .treatment-heading {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 18px;
-    flex-wrap: wrap;
     margin-bottom: 12px;
 }
 
 .treatment-heading .finding-copy {
     margin-top: 3px;
-}
-
-.treatment-date-field {
-    min-width: 190px;
-}
-
-.treatment-date-field .DateInput,
-.treatment-date-field .DateInput_input {
-    width: 150px;
-}
-
-.treatment-date-field .DateInput_input {
-    height: 34px;
-    padding: 0 10px;
-    font-size: 13px;
 }
 
 .finding-treatment {
@@ -268,6 +217,38 @@ body {
 
 .finding-values strong {
     font-size: 18px;
+}
+
+.treatment-values {
+    gap: 28px;
+}
+
+.events-heading {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 18px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+}
+
+.events-heading h2 {
+    margin-bottom: 0;
+}
+
+.event-date-field .DateInput,
+.event-date-field .DateInput_input {
+    width: 142px;
+}
+
+.event-date-field .DateInput_input {
+    height: 34px;
+    padding: 0 10px;
+    font-size: 13px;
+}
+
+.event-empty {
+    padding: 16px 12px 4px;
 }
 
 .disclaimer {

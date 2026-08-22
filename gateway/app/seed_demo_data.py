@@ -100,7 +100,7 @@ def _insert_bouts(
                 | ((duration_s & 0x1F) << 3)
             )
             received = occurred + timedelta(seconds=2)
-            # One delayed row exercises event_ts vs received_ts in Live Feed.
+            # One delayed row exercises event_ts vs received_ts in Cough events.
             if day == local_now.date() and index == 0:
                 received = local_now - timedelta(seconds=5)
             event_ts = _utc_iso(occurred)
@@ -165,11 +165,11 @@ def seed_demo_data(
         last_seen=warmup_last_seen,
     )
 
-    # Nine completed dates provide one conservative partial first day, seven
-    # expanding-baseline days, and one post-treatment comparison day.
-    above_history = [8, 9, 10, 9, 11, 10, 10, 7, 5]
+    # Three completed treatment weeks exercise automatic Week 1 baseline,
+    # expanding Week 2+ comparisons, EWMA, and the completed seven-day chart.
+    above_history = [12] * 7 + [8] * 7 + [5] * 7
     above_schedule = [
-        (local_now.date() - timedelta(days=9 - index), count)
+        (local_now.date() - timedelta(days=21 - index), count)
         for index, count in enumerate(above_history)
     ]
     above_schedule.append((local_now.date(), 22))
@@ -187,12 +187,6 @@ def seed_demo_data(
     warmup_count = _insert_bouts(
         dao, WARMUP_CLIENT, WARMUP_DEVICE, warmup_schedule, local_now
     )
-    dao.set_treatment_start_date(
-        ABOVE_CLIENT,
-        (local_now.date() - timedelta(days=1)).isoformat(),
-    )
-    dao.set_treatment_start_date(WARMUP_CLIENT, local_now.date().isoformat())
-
     dao.insert_environment(
         {
             "message_id": f"{DEMO_PREFIX}environment-01",
