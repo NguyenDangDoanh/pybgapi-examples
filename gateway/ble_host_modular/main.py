@@ -54,6 +54,9 @@ def main() -> None:
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # pyBGAPI logs every raw advertisement at DEBUG. Keep project-level
+    # scanner diagnostics useful without flooding or slowing the event loop.
+    logging.getLogger("bgapi").setLevel(logging.WARNING)
 
     supervise(args)
 
