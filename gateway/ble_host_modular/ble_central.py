@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import struct
 import time
 import uuid
@@ -32,6 +33,7 @@ from constants import (
     PHY_1M,
     RECONNECT_DELAY_SECONDS,
     SCAN_ACTIVE,
+    SCAN_REJECTION_LOG_INTERVAL_SECONDS,
     SCANNER_DISCOVER_OBSERVATION,
 )
 from models import ConnectionState, PendingNode
@@ -85,6 +87,7 @@ class BleCentral:
         self.session_id = str(uuid.uuid4())
         self.sequence = 0
         self._closed = False
+        self._advertisement_debug_after: dict[tuple[str, str], float] = {}
 
     @property
     def connecting(self) -> bool:
@@ -93,13 +96,26 @@ class BleCentral:
     def run(self) -> None:
         try:
             self.lib.open()
-        except (OSError, ConnectorException) as exc:
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
             self.close()
             raise NcpTransportLost(
                 f"Cannot open BGM220 NCP at {self.args.serial_port}: {exc}"
             ) from exc
 
-        LOG.info("Opened NCP serial port: %s", self.args.serial_port)
+        requested_port = str(self.args.serial_port)
+        LOG.info(
+            "Opened NCP serial port requested=%s resolved=%s baud=%d "
+            "rtscts=%s session=%s",
+            requested_port,
+            os.path.realpath(requested_port),
+            getattr(self.args, "baudrate", 115200),
+            (
+                "enabled"
+                if not getattr(self.args, "no_flow_control", False)
+                else "disabled"
+            ),
+            self.session_id,
+        )
         LOG.info(
             "BLE host session=%s max_connections=%d",
             self.session_id,
@@ -118,10 +134,8 @@ class BleCentral:
                 raise SystemExit(
                     f"NCP reboot failed: 0x{exc.errorcode:04x}"
                 ) from exc
-            except (OSError, ConnectorException) as exc:
-                raise NcpTransportLost(
-                    f"BGM220 NCP transport failed during reboot: {exc}"
-                ) from exc
+            except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+                self._raise_transport_lost("system.reboot", exc)
 
             while True:
                 now = time.monotonic()
@@ -129,7 +143,7 @@ class BleCentral:
                     LOG.error("BGM220 NCP transport lost")
                     raise NcpTransportLost("BGM220 NCP transport lost")
                 if not self.booted and now > self.boot_deadline:
-                    raise SystemExit(
+                    raise NcpTransportLost(
                         "NCP boot timeout. Check BGM220 firmware, baud rate, "
                         "RTS/CTS, and sl_bt.xapi."
                     )
@@ -152,12 +166,8 @@ class BleCentral:
 
                 try:
                     event = self.lib.get_event(timeout=0.5)
-                except Exception as exc:
-                    if not self._ncp_transport_alive():
-                        raise NcpTransportLost(
-                            "BGM220 NCP transport lost while reading events"
-                        ) from exc
-                    raise
+                except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+                    self._raise_transport_lost("event read", exc)
                 if event is not None:
                     self.dispatch(event)
         except KeyboardInterrupt:
@@ -171,7 +181,7 @@ class BleCentral:
         self._closed = True
 
         try:
-            self.stop_scan()
+            self.stop_scan(best_effort=True)
         except Exception:
             LOG.debug("Scanner cleanup failed", exc_info=True)
 
@@ -221,6 +231,13 @@ class BleCentral:
             return bool(handler.is_alive())
         except Exception:
             return False
+
+    @staticmethod
+    def _raise_transport_lost(operation: str, exc: BaseException) -> None:
+        """Normalize a failed BGAPI session into one supervisor signal."""
+        raise NcpTransportLost(
+            f"BGM220 NCP transport failed during {operation}: {exc}"
+        ) from exc
 
     def _has_connection_capacity(self) -> bool:
         return len(self.connections) < self.args.max_connections
@@ -287,6 +304,8 @@ class BleCentral:
             LOG.error("Cannot start scanner: 0x%04x", exc.errorcode)
             self.scan_retry_after = time.monotonic() + RECONNECT_DELAY_SECONDS
             return
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost("scanner.start", exc)
 
         self.scanning = True
         target = self.target_address or f"name prefix '{self.args.name_prefix}'"
@@ -297,14 +316,50 @@ class BleCentral:
             self.args.max_connections,
         )
 
-    def stop_scan(self) -> None:
+    def stop_scan(self, *, best_effort: bool = False) -> None:
         if not self.scanning:
             return
         try:
             self.lib.bt.scanner.stop()
-        except Exception:
-            pass
-        self.scanning = False
+        except bgapi.bglib.CommandFailedError as exc:
+            LOG.warning("Cannot stop scanner: 0x%04x", exc.errorcode)
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            if best_effort:
+                LOG.debug("Scanner cleanup failed: %s", exc)
+            else:
+                self.scanning = False
+                self._raise_transport_lost("scanner.stop", exc)
+        finally:
+            self.scanning = False
+
+    def _debug_rejected_advertisement(
+        self,
+        address: str,
+        reason: str,
+        event: Any,
+        name: str = "",
+        detail: str = "",
+    ) -> None:
+        """Rate-limit DEBUG diagnostics for scanner filtering decisions."""
+        if not LOG.isEnabledFor(logging.DEBUG):
+            return
+        now = time.monotonic()
+        key = (address, reason)
+        if now < self._advertisement_debug_after.get(key, 0.0):
+            return
+        self._advertisement_debug_after[key] = (
+            now + SCAN_REJECTION_LOG_INTERVAL_SECONDS
+        )
+        LOG.debug(
+            "Rejected advertisement address=%s type=%s name=%r RSSI=%s "
+            "reason=%s%s",
+            address,
+            getattr(event, "address_type", "?"),
+            name,
+            getattr(event, "rssi", "?"),
+            reason,
+            f" ({detail})" if detail else "",
+        )
 
     def dispatch(self, event: Any) -> None:
         if event == "bt_evt_system_boot":
@@ -344,18 +399,58 @@ class BleCentral:
         try:
             address = normalize_address(event.address)
         except ValueError:
+            self._debug_rejected_advertisement(
+                repr(getattr(event, "address", "?")),
+                "invalid-address",
+                event,
+            )
             return
 
         name = extract_advertised_name(event.data) or ""
-        matches = (
-            address == self.target_address
-            if self.target_address is not None
-            else bool(name) and name.startswith(self.args.name_prefix)
+        if self.target_address is not None and address != self.target_address:
+            self._debug_rejected_advertisement(
+                address,
+                "address-mismatch",
+                event,
+                name,
+                f"expected={self.target_address}",
+            )
+            return
+        if self.target_address is None and not name:
+            self._debug_rejected_advertisement(address, "no-name", event)
+            return
+        if self.target_address is None and not name.startswith(self.args.name_prefix):
+            self._debug_rejected_advertisement(
+                address,
+                "wrong-prefix",
+                event,
+                name,
+                f"expected={self.args.name_prefix!r}",
+            )
+            return
+        if address in self.connection_by_address:
+            self._debug_rejected_advertisement(
+                address, "already-connected", event, name
+            )
+            return
+        retry_remaining = self.retry_after_by_address.get(address, 0.0) - time.monotonic()
+        if retry_remaining > 0.0:
+            self._debug_rejected_advertisement(
+                address,
+                "retry-after",
+                event,
+                name,
+                f"remaining={retry_remaining:.1f}s",
+            )
+            return
+
+        LOG.debug(
+            "Accepted advertisement candidate address=%s type=%d name=%r RSSI=%d",
+            address,
+            event.address_type,
+            name,
+            event.rssi,
         )
-        if not matches or address in self.connection_by_address:
-            return
-        if time.monotonic() < self.retry_after_by_address.get(address, 0.0):
-            return
 
         LOG.info(
             "Found xG26 name=%r address=%s type=%d RSSI=%d dBm",
@@ -378,6 +473,8 @@ class BleCentral:
             self.retry_after_by_address[address] = time.monotonic() + FAILED_NODE_RETRY_SECONDS
             self.pending_node = None
             self.scan_retry_after = time.monotonic() + RECONNECT_DELAY_SECONDS
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost("connection.open", exc)
 
     def on_connection_opened(self, event: Any) -> None:
         address = normalize_address(event.address)
@@ -387,8 +484,14 @@ class BleCentral:
             LOG.warning("Connection capacity exceeded; closing handle=%d", event.connection)
             try:
                 self.lib.bt.connection.close(event.connection)
-            except Exception:
-                pass
+            except bgapi.bglib.CommandFailedError as exc:
+                LOG.warning(
+                    "Cannot close excess connection handle=%d: 0x%04x",
+                    event.connection,
+                    exc.errorcode,
+                )
+            except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+                self._raise_transport_lost("connection.close", exc)
             return
 
         state = ConnectionState(
@@ -414,6 +517,8 @@ class BleCentral:
         except bgapi.bglib.CommandFailedError as exc:
             LOG.error("Service discovery command failed for %s: 0x%04x", address, exc.errorcode)
             self.disconnect_connection(state.handle)
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost("gatt.discover_primary_services", exc)
 
     def _state_for_event(self, event: Any) -> ConnectionState | None:
         return self.connections.get(getattr(event, "connection", -1))
@@ -513,6 +618,8 @@ class BleCentral:
         except bgapi.bglib.CommandFailedError as exc:
             LOG.error("[%s] Characteristic discovery failed: 0x%04x", state.address, exc.errorcode)
             self.disconnect_connection(state.handle)
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost("gatt.discover_characteristics", exc)
 
     def _finish_characteristic_discovery(self, state: ConnectionState) -> None:
         missing: list[str] = []
@@ -533,6 +640,10 @@ class BleCentral:
         except bgapi.bglib.CommandFailedError as exc:
             LOG.error("[%s] Cannot enable cough notifications: 0x%04x", state.address, exc.errorcode)
             self.disconnect_connection(state.handle)
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost(
+                "gatt.set_characteristic_notification(cough)", exc
+            )
 
     def _enable_environment_notifications(self, state: ConnectionState) -> None:
         state.phase = "enable_environment_notifications"
@@ -544,6 +655,10 @@ class BleCentral:
         except bgapi.bglib.CommandFailedError as exc:
             LOG.error("[%s] Cannot enable environment notifications: 0x%04x", state.address, exc.errorcode)
             self.disconnect_connection(state.handle)
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost(
+                "gatt.set_characteristic_notification(environment)", exc
+            )
 
     def _finish_notification_setup(self, state: ConnectionState) -> None:
         LOG.info(
@@ -596,6 +711,8 @@ class BleCentral:
             )
             self._finish_time_sync(state, succeeded=False)
             return True
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost("gatt.write_characteristic_value", exc)
 
         LOG.info(
             "[%s] Writing Unix epoch=%d to Time characteristic (%s)",
@@ -795,6 +912,10 @@ class BleCentral:
             self.lib.bt.gatt.send_characteristic_confirmation(state.handle)
         except bgapi.bglib.CommandFailedError as exc:
             LOG.error("[%s] Indication confirmation failed: 0x%04x", state.address, exc.errorcode)
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost(
+                "gatt.send_characteristic_confirmation", exc
+            )
 
     def on_connection_closed(self, event: Any) -> None:
         state = self.connections.get(event.connection)
@@ -833,3 +954,5 @@ class BleCentral:
             if state.status_reported:
                 self._emit_status(state, "disconnected")
             self._forget_connection(state)
+        except (bgapi.bglib.CommandError, OSError, ConnectorException) as exc:
+            self._raise_transport_lost("connection.close", exc)

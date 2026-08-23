@@ -10,6 +10,7 @@ import threading
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -1027,7 +1028,10 @@ class BleRoutingTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         # The CI/container does not need pybgapi to exercise pure routing logic.
-        class FakeCommandFailedError(Exception):
+        class FakeCommandError(Exception):
+            pass
+
+        class FakeCommandFailedError(FakeCommandError):
             def __init__(self, errorcode: int = 1) -> None:
                 super().__init__(errorcode)
                 self.errorcode = errorcode
@@ -1038,12 +1042,294 @@ class BleRoutingTest(unittest.TestCase):
             "ConnectorException", (Exception,), {}
         )
         fake_bgapi.bglib = SimpleNamespace(
+            CommandError=FakeCommandError,
             CommandFailedError=FakeCommandFailedError,
         )
         fake_bgapi.connector = fake_connector
         sys.modules.setdefault("bgapi", fake_bgapi)
         sys.modules.setdefault("bgapi.connector", fake_connector)
         sys.path.insert(0, str(ROOT / "gateway" / "ble_host_modular"))
+
+    @staticmethod
+    def _minimal_run_central(*, booted: bool = False):
+        from ble_central import BleCentral
+
+        central = BleCentral.__new__(BleCentral)
+        central.args = SimpleNamespace(
+            serial_port="/dev/serial/by-id/test-bgm220",
+            baudrate=115200,
+            no_flow_control=False,
+            max_connections=0,
+        )
+        central.session_id = "transport-test-session"
+        central.booted = booted
+        central.scanning = False
+        central.pending_node = None
+        central.connections = {}
+        central.connection_by_address = {}
+        central.retry_after_by_address = {}
+        central.boot_deadline = 0.0
+        central.scan_retry_after = 0.0
+        central.utc_sync_date = date(2026, 8, 23)
+        central.sequence = 0
+        central._closed = False
+        central._advertisement_debug_after = {}
+        central.backend = SimpleNamespace(enabled=False, close=lambda: None)
+        return central
+
+    def test_boot_timeout_is_recoverable_transport_loss(self) -> None:
+        from ble_central import NcpTransportLost
+
+        central = self._minimal_run_central()
+        central.lib = SimpleNamespace(
+            open=lambda: None,
+            close=lambda: None,
+            conn_handler=SimpleNamespace(is_alive=lambda: True),
+            bt=SimpleNamespace(system=SimpleNamespace(reboot=lambda: None)),
+        )
+
+        with patch("ble_central.time.monotonic", side_effect=[0.0, 9.0]):
+            with self.assertRaisesRegex(NcpTransportLost, "NCP boot timeout"):
+                central.run()
+
+    def test_base_command_error_during_reboot_rebuilds_ncp_session(self) -> None:
+        import bgapi
+        from ble_central import NcpTransportLost
+
+        central = self._minimal_run_central()
+
+        def fail_reboot() -> None:
+            raise bgapi.bglib.CommandError("No response")
+
+        central.lib = SimpleNamespace(
+            open=lambda: None,
+            close=lambda: None,
+            conn_handler=SimpleNamespace(is_alive=lambda: True),
+            bt=SimpleNamespace(system=SimpleNamespace(reboot=fail_reboot)),
+        )
+
+        with self.assertRaisesRegex(NcpTransportLost, "system.reboot"):
+            central.run()
+
+    def test_raw_serial_event_error_rebuilds_ncp_session(self) -> None:
+        from ble_central import NcpTransportLost
+
+        central = self._minimal_run_central(booted=True)
+
+        def fail_event_read(*, timeout: float):
+            raise OSError(f"serial disconnected after {timeout}s")
+
+        central.lib = SimpleNamespace(
+            open=lambda: None,
+            close=lambda: None,
+            get_event=fail_event_read,
+            conn_handler=SimpleNamespace(is_alive=lambda: True),
+            bt=SimpleNamespace(system=SimpleNamespace(reboot=lambda: None)),
+        )
+
+        with self.assertRaisesRegex(NcpTransportLost, "event read"):
+            central.run()
+
+    @staticmethod
+    def _scanner_central(start) -> object:
+        from ble_central import BleCentral
+
+        central = BleCentral.__new__(BleCentral)
+        central.scanning = False
+        central.pending_node = None
+        central.connections = {}
+        central.args = SimpleNamespace(
+            max_connections=2,
+            scan_interval=80,
+            scan_window=40,
+            name_prefix="MyDevice",
+        )
+        central.target_address = None
+        central.scan_retry_after = 0.0
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(
+                scanner=SimpleNamespace(
+                    set_parameters=lambda *args: None,
+                    start=start,
+                )
+            )
+        )
+        return central
+
+    def test_base_command_error_during_scanner_start_is_transport_loss(self) -> None:
+        import bgapi
+        from ble_central import NcpTransportLost
+
+        def fail_start(*_args) -> None:
+            raise bgapi.bglib.CommandError("No response")
+
+        central = self._scanner_central(fail_start)
+        with self.assertRaisesRegex(NcpTransportLost, "scanner.start"):
+            central.start_scan()
+
+    def test_command_failed_scanner_start_remains_command_level(self) -> None:
+        import bgapi
+
+        def fail_start(*_args) -> None:
+            raise bgapi.bglib.CommandFailedError(0x0180)
+
+        central = self._scanner_central(fail_start)
+        central.start_scan()
+
+        self.assertFalse(central.scanning)
+        self.assertGreater(central.scan_retry_after, 0.0)
+
+    def test_base_command_error_during_scanner_stop_is_transport_loss(self) -> None:
+        import bgapi
+        from ble_central import BleCentral, NcpTransportLost
+
+        def fail_stop() -> None:
+            raise bgapi.bglib.CommandError("No response")
+
+        central = BleCentral.__new__(BleCentral)
+        central.scanning = True
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(scanner=SimpleNamespace(stop=fail_stop))
+        )
+
+        with self.assertRaisesRegex(NcpTransportLost, "scanner.stop"):
+            central.stop_scan()
+        self.assertFalse(central.scanning)
+
+    def test_base_command_error_during_connection_open_is_transport_loss(self) -> None:
+        import bgapi
+        from ble_central import BleCentral, NcpTransportLost
+
+        def fail_open(*_args) -> None:
+            raise bgapi.bglib.CommandError("Send timeout")
+
+        central = BleCentral.__new__(BleCentral)
+        central.scanning = True
+        central.pending_node = None
+        central.connections = {}
+        central.connection_by_address = {}
+        central.retry_after_by_address = {}
+        central._advertisement_debug_after = {}
+        central.args = SimpleNamespace(max_connections=2, name_prefix="MyDevice")
+        central.target_address = None
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(
+                scanner=SimpleNamespace(stop=lambda: None),
+                connection=SimpleNamespace(open=fail_open),
+            )
+        )
+        event = SimpleNamespace(
+            address="aa:bb:cc:dd:ee:01",
+            address_type=0,
+            data=b"\x0c\x09MyDevice_01",
+            rssi=-45,
+        )
+
+        with self.assertRaisesRegex(NcpTransportLost, "connection.open"):
+            central.on_advertisement(event)
+
+    def test_base_command_error_during_primary_discovery_is_transport_loss(self) -> None:
+        import bgapi
+        from ble_central import BleCentral, NcpTransportLost
+
+        def fail_discovery(_handle) -> None:
+            raise bgapi.bglib.CommandError("No response")
+
+        central = BleCentral.__new__(BleCentral)
+        central.pending_node = None
+        central.connections = {}
+        central.connection_by_address = {}
+        central.retry_after_by_address = {}
+        central.args = SimpleNamespace(max_connections=2)
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(
+                gatt=SimpleNamespace(discover_primary_services=fail_discovery)
+            )
+        )
+        event = SimpleNamespace(
+            connection=1,
+            address="aa:bb:cc:dd:ee:01",
+            address_type=0,
+        )
+
+        with self.assertRaisesRegex(
+            NcpTransportLost, "gatt.discover_primary_services"
+        ):
+            central.on_connection_opened(event)
+
+    def test_base_command_errors_during_gatt_commands_are_transport_loss(self) -> None:
+        import bgapi
+        from ble_central import BleCentral, NcpTransportLost
+        from constants import GATT_PROPERTY_WRITE
+        from models import ConnectionState
+
+        def fail(*_args) -> None:
+            raise bgapi.bglib.CommandError("Wrong response")
+
+        state = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            target_service=3,
+            cough_characteristic=10,
+            environment_characteristic=11,
+            time_characteristic=12,
+            time_characteristic_properties=GATT_PROPERTY_WRITE,
+        )
+        central = BleCentral.__new__(BleCentral)
+        central.args = SimpleNamespace(
+            service_uuid="service",
+            cough_uuid="cough",
+            environment_uuid="environment",
+        )
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(
+                gatt=SimpleNamespace(
+                    discover_characteristics=fail,
+                    set_characteristic_notification=fail,
+                    write_characteristic_value=fail,
+                    send_characteristic_confirmation=fail,
+                )
+            )
+        )
+        central.disconnect_connection = lambda handle: None
+
+        checks = (
+            (lambda: central._finish_service_discovery(state), "discover_characteristics"),
+            (
+                lambda: central._finish_characteristic_discovery(state),
+                "set_characteristic_notification",
+            ),
+            (lambda: central._start_time_sync(state, "test", epoch=1), "write_characteristic_value"),
+            (
+                lambda: central._confirm_indication_if_needed(state, 0x1D),
+                "send_characteristic_confirmation",
+            ),
+        )
+        for action, operation in checks:
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(NcpTransportLost, operation):
+                    action()
+
+    def test_base_command_error_during_connection_close_is_transport_loss(self) -> None:
+        import bgapi
+        from ble_central import BleCentral, NcpTransportLost
+        from models import ConnectionState
+
+        state = ConnectionState(1, "aa:bb:cc:dd:ee:01", 0, "MyDevice_01")
+
+        def fail_close(_handle) -> None:
+            raise bgapi.bglib.CommandError("No response")
+
+        central = BleCentral.__new__(BleCentral)
+        central.connections = {state.handle: state}
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(connection=SimpleNamespace(close=fail_close))
+        )
+
+        with self.assertRaisesRegex(NcpTransportLost, "connection.close"):
+            central.disconnect_connection(state.handle)
 
     def test_connector_open_error_is_reported_without_secondary_failure(self) -> None:
         from bgapi.connector import ConnectorException

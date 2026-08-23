@@ -20,7 +20,14 @@ def supervise(
     sleep=time.sleep,
 ) -> None:
     """Run one BLE host at a time and recreate it after NCP transport loss."""
+    attempt = 0
     while True:
+        attempt += 1
+        LOG.info(
+            "Starting BGM220 host session attempt=%d serial=%s",
+            attempt,
+            getattr(args, "serial_port", "<unspecified>"),
+        )
         try:
             central_factory(args).run()
             break

@@ -43,3 +43,45 @@ Important:
 - Backend delivery is buffered and bounded; SQLite message_id deduplication
   prevents retries from creating duplicate rows.
 - Connection-open and GATT procedure timeouts prevent one bad node from blocking the fleet.
+
+BGM220 hot-unplug / hot-plug recovery
+--------------------------------------
+
+The supervisor owns exactly one BleCentral instance at a time. Reader-thread
+death, raw serial/connector failures, BGAPI no-response/send-timeout/wrong-
+response errors, and NCP boot timeout are normalized to NcpTransportLost. The
+old BGLib/SerialConnector is closed best effort, the supervisor waits 2 seconds,
+then constructs a completely fresh session. A CommandFailedError is different:
+it means the NCP returned a valid response with a Bluetooth status code, so the
+current command/node is handled without blindly rebuilding the NCP.
+
+Each successful serial open logs the requested path, resolved tty, baud rate,
+RTS/CTS mode, and session_id. With -l DEBUG, scanner candidates rejected for an
+invalid address, missing name, wrong prefix, exact-address mismatch, retry
+backoff, or an existing connection are rate-limited and logged. The expected
+recovery milestones are:
+
+1. Opened NCP serial port
+2. BGM220 Bluetooth stack booted
+3. Scanning for xG26
+4. Found xG26
+5. Connected to xG26
+6. Notifications enabled and optional Time synchronization
+7. connected status followed by environment_data/cough_event
+
+The xG26 firmware is a separate part of this recovery contract. After BLE
+supervision timeout it must handle sl_bt_evt_connection_closed, clear its stale
+connection state, and restart connectable advertising with the MyDevice name.
+The offline buffer must not prevent advertiser restart.
+
+If recovery fails on hardware, verify all of the following before changing
+flow control in software:
+
+- the stable /dev/serial/by-id path resolves to the expected tty;
+- no second process owns the resolved tty (sudo fuser -v <tty>);
+- baud is 115200 and RTS/CTS is configured consistently on BGM220 NCP and
+  J-Link/VCOM, including after a USB power cycle;
+- the Pi is not undervolted (vcgencmd get_throttled) and USB power/cable are
+  stable;
+- EFR Connect can see MyDevice after the old BLE link reaches supervision
+  timeout. If it cannot, repair the EFR32 connection_closed advertiser restart.
