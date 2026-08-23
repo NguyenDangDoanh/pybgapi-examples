@@ -15,6 +15,7 @@ from .analytics import DISPLAY_TIMEZONE
 from .dao import Dao
 
 SIM_PREFIX = "dashboard-sim-"
+SIMULATOR_STATUS_HEARTBEAT_SECONDS = 10.0
 LEGACY_DEMO_MESSAGE_PREFIX = "demo-dashboard-"
 LEGACY_DEMO_CLIENT_IDS = (
     "demo_patient_above_baseline",
@@ -344,6 +345,19 @@ def insert_live_event(
     )
 
 
+def refresh_simulated_device_status(
+    dao: Dao,
+    now: datetime | None = None,
+) -> int:
+    """Refresh simulated BLE connectivity without creating sensor events."""
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    for profile in PROFILES:
+        _upsert_profile_device(dao, profile, now_utc)
+    return len(PROFILES)
+
+
 def run_live(dao: Dao, *, seed: int, time_scale: float = 1.0) -> None:
     """Keep inserting stochastic live events until interrupted."""
     if time_scale <= 0:
@@ -355,11 +369,22 @@ def run_live(dao: Dao, *, seed: int, time_scale: float = 1.0) -> None:
         + rng.expovariate(profile.live_rate_per_hour / 3600.0) / time_scale
         for profile in PROFILES
     }
+    next_heartbeat_at = clock.monotonic() + SIMULATOR_STATUS_HEARTBEAT_SECONDS
     mode = "real time" if time_scale == 1.0 else f"accelerated test mode ({time_scale:g}x)"
     print(f"Live simulator running in {mode}; press Ctrl+C to stop.", flush=True)
     while True:
+        now_monotonic = clock.monotonic()
+        if now_monotonic >= next_heartbeat_at:
+            refresh_simulated_device_status(dao)
+            next_heartbeat_at = (
+                now_monotonic + SIMULATOR_STATUS_HEARTBEAT_SECONDS
+            )
+            continue
         profile = min(PROFILES, key=lambda item: next_due[item.key])
-        delay = max(next_due[profile.key] - clock.monotonic(), 0.0)
+        delay = max(
+            min(next_due[profile.key], next_heartbeat_at) - now_monotonic,
+            0.0,
+        )
         if delay:
             clock.sleep(min(delay, 1.0))
             continue
@@ -405,8 +430,7 @@ def main() -> None:
             cleanup_simulated_data(dao)
         if args.history_only:
             return
-        for profile in PROFILES:
-            _upsert_profile_device(dao, profile, datetime.now(timezone.utc))
+        refresh_simulated_device_status(dao)
         run_live(dao, seed=args.seed, time_scale=args.time_scale)
     except KeyboardInterrupt:
         print("Simulator stopped.")

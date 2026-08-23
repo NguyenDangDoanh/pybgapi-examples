@@ -29,6 +29,7 @@ from gateway.app.simulate_dashboard_data import (
     SIM_PREFIX,
     cleanup_simulated_data,
     insert_live_event,
+    refresh_simulated_device_status,
     simulate_history,
 )
 
@@ -754,6 +755,12 @@ class AnalyticsTest(unittest.TestCase):
 
 
 class SimulatedDataTest(unittest.TestCase):
+    @staticmethod
+    def _iso(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+
     def test_simulator_is_reproducible_isolated_and_supports_live_insert(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             dao = Dao(str(Path(tempdir) / "sim.db"))
@@ -875,6 +882,43 @@ class SimulatedDataTest(unittest.TestCase):
                     )
                 )
                 self.assertEqual(before + 1, len(dao.get_events(profile.client_id)))
+
+                event_count = len(dao.get_recent_events(500))
+                environment_count = len(dao.get_recent_environment(500))
+                dao.mark_stale_devices_offline(
+                    "2026-08-23T12:00:01.000Z"
+                )
+                self.assertTrue(
+                    all(
+                        row["status"] == "offline"
+                        for row in dao.get_devices()
+                        if row["device_id"].startswith(SIM_PREFIX)
+                    )
+                )
+                heartbeat_at = now + timedelta(seconds=10)
+                self.assertEqual(
+                    len(PROFILES),
+                    refresh_simulated_device_status(dao, now=heartbeat_at),
+                )
+                simulated_devices = [
+                    row
+                    for row in dao.get_devices()
+                    if row["device_id"].startswith(SIM_PREFIX)
+                ]
+                self.assertTrue(
+                    all(row["status"] == "online" for row in simulated_devices)
+                )
+                self.assertTrue(
+                    all(
+                        row["last_seen"] == self._iso(heartbeat_at)
+                        for row in simulated_devices
+                    )
+                )
+                self.assertEqual(event_count, len(dao.get_recent_events(500)))
+                self.assertEqual(
+                    environment_count,
+                    len(dao.get_recent_environment(500)),
+                )
                 cleanup_simulated_data(dao)
                 self.assertFalse(
                     any(
@@ -1014,6 +1058,62 @@ class BleRoutingTest(unittest.TestCase):
         central._check_timeouts(6.0)
 
         self.assertEqual([1], disconnected)
+
+    def test_clean_ble_host_shutdown_reports_running_nodes_offline(self) -> None:
+        from ble_central import BleCentral
+        from models import ConnectionState
+
+        reported = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            phase="running",
+            status_reported=True,
+        )
+        unreported = ConnectionState(
+            2,
+            "aa:bb:cc:dd:ee:02",
+            0,
+            "MyDevice_02",
+            phase="discover_characteristics",
+            status_reported=False,
+        )
+        statuses: list[tuple[str, str]] = []
+        closed_handles: list[int] = []
+        backend_closed: list[bool] = []
+        library_closed: list[bool] = []
+        central = BleCentral.__new__(BleCentral)
+        central.connections = {1: reported, 2: unreported}
+        central.connection_by_address = {
+            reported.address: 1,
+            unreported.address: 2,
+        }
+        central.pending_node = None
+        central.stop_scan = lambda: None
+        central._emit_status = lambda state, status: statuses.append(
+            (state.address, status)
+        )
+        central.backend = SimpleNamespace(
+            close=lambda: backend_closed.append(True)
+        )
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(
+                connection=SimpleNamespace(
+                    close=lambda handle: closed_handles.append(handle)
+                )
+            ),
+            close=lambda: library_closed.append(True),
+        )
+
+        central.close()
+
+        self.assertEqual([(reported.address, "disconnected")], statuses)
+        self.assertFalse(reported.status_reported)
+        self.assertEqual([1, 2], closed_handles)
+        self.assertEqual({}, central.connections)
+        self.assertEqual([True], backend_closed)
+        self.assertEqual([True], library_closed)
 
     def test_status_heartbeat_is_per_running_connection(self) -> None:
         from ble_central import BleCentral

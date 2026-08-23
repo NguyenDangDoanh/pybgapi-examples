@@ -140,6 +140,10 @@ class BleCentral:
 
     def close(self) -> None:
         self.stop_scan()
+        for state in list(self.connections.values()):
+            if state.status_reported:
+                self._emit_status(state, "disconnected")
+                state.status_reported = False
         for handle in list(self.connections):
             try:
                 self.lib.bt.connection.close(handle)

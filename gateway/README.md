@@ -350,6 +350,11 @@ and rare prolonged bouts. All simulator patients, devices, and messages use the
 reserved `dashboard-sim-` prefix. `--replace` removes only those records; real
 gateway data is untouched.
 
+While live simulation is running, it refreshes each simulated device's
+connectivity status every 10 seconds without creating cough or environment
+rows. This keeps simulated devices Online under the same 30-second freshness
+rule as physical devices without changing their analytics.
+
 ## Optional environment variables
 
 ```bash
