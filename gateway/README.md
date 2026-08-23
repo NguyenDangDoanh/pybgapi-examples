@@ -63,6 +63,18 @@ different number of simultaneous BLE links.
 `event_counter`, `timestamp_source`, and `received_ts`; node time changes do
 not replace or remove those audit fields.
 
+## Device connectivity status
+
+Each connection that has completed GATT setup sends an independent best-effort
+status heartbeat every 10 seconds. Heartbeats are never placed in the backend
+retry FIFO, so cough, environment, connect, and disconnect messages retain
+their ordering and queue capacity. A disconnect event marks the device offline
+immediately. As a fallback, `/api/devices` marks an online device offline when
+its `last_seen` proof of life is more than 30 seconds old; stale expiration does
+not overwrite `last_seen`. Initial connection, heartbeat, and valid cough or
+environment packets refresh `last_seen` from gateway receive time, never from a
+historical cough `event_ts`.
+
 ## Time synchronization contract
 
 ### GATT UUIDs

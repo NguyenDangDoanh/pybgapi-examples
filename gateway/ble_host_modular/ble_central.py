@@ -23,6 +23,7 @@ from constants import (
     BOOT_TIMEOUT_SECONDS,
     CLOSE_TIMEOUT_SECONDS,
     CONNECT_TIMEOUT_SECONDS,
+    DEVICE_STATUS_HEARTBEAT_SECONDS,
     FAILED_NODE_RETRY_SECONDS,
     GATT_PROCEDURE_TIMEOUT_SECONDS,
     GATT_NOTIFICATION,
@@ -114,6 +115,7 @@ class BleCentral:
                     )
 
                 self._check_timeouts(now)
+                self._check_status_heartbeats(now)
                 self._check_daily_time_sync()
 
                 if (
@@ -560,7 +562,33 @@ class BleCentral:
         if not state.status_reported:
             self._emit_status(state, "connected")
             state.status_reported = True
+            state.last_status_heartbeat_at = time.monotonic()
         self.start_scan()
+
+    def _check_status_heartbeats(self, now: float) -> None:
+        """Best-effort proof of life for each fully configured BLE link."""
+        for state in list(self.connections.values()):
+            if state.phase != "running" or not state.status_reported:
+                continue
+            if (
+                now - state.last_status_heartbeat_at
+                < DEVICE_STATUS_HEARTBEAT_SECONDS
+            ):
+                continue
+            self._emit_status_heartbeat(state)
+            state.last_status_heartbeat_at = now
+
+    def _emit_status_heartbeat(self, state: ConnectionState) -> None:
+        received_at = utc_now_iso()
+        message = self._next_envelope(state, "status", received_at)
+        message.update(
+            {
+                "status": "connected",
+                "heartbeat": True,
+                "event_ts": received_at,
+            }
+        )
+        self._publish_best_effort(message)
 
     def _check_daily_time_sync(self, now_utc: datetime | None = None) -> None:
         """At each UTC date boundary, resync all eligible connected nodes."""
@@ -685,6 +713,11 @@ class BleCentral:
         print(json.dumps(message, ensure_ascii=False), flush=True)
         if self.backend.enabled and not self.backend.send(message):
             LOG.warning("Message queued for backend retry; BLE remains active.")
+
+    def _publish_best_effort(self, message: dict[str, Any]) -> None:
+        print(json.dumps(message, ensure_ascii=False), flush=True)
+        if self.backend.enabled and not self.backend.send_best_effort(message):
+            LOG.debug("Best-effort status heartbeat skipped; it was not queued.")
 
     def _confirm_indication_if_needed(self, state: ConnectionState, opcode: int) -> None:
         if opcode != ATT_HANDLE_VALUE_INDICATION:

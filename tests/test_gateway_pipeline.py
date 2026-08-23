@@ -48,6 +48,12 @@ class PipelineTest(unittest.TestCase):
         self.tempdir.cleanup()
 
     @staticmethod
+    def _iso(value: datetime) -> str:
+        return value.astimezone(timezone.utc).isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z")
+
+    @staticmethod
     def cough_message(device: str, message_id: str, counter: int) -> dict:
         return {
             "schema_version": 1,
@@ -114,6 +120,74 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(1785369600, row["node_event_timestamp"])
         self.assertEqual(10, row["event_counter"])
         self.assertEqual("node_unix_seconds", row["timestamp_source"])
+        self.assertEqual(
+            "2026-07-30T02:00:00.123Z",
+            self.dao.get_device("aa:bb:cc:dd:ee:01")["last_seen"],
+        )
+
+    def test_status_heartbeat_refreshes_last_seen_and_disconnects_immediately(self) -> None:
+        device = "aa:bb:cc:dd:ee:01"
+        for message_id, received_at, status, heartbeat in (
+            ("connected", "2026-07-30T02:00:00.000Z", "connected", False),
+            ("heartbeat", "2026-07-30T02:00:10.000Z", "connected", True),
+            ("disconnected", "2026-07-30T02:00:11.000Z", "disconnected", False),
+        ):
+            self.processor.process(
+                {
+                    "event": "status",
+                    "message_id": message_id,
+                    "received_at": received_at,
+                    "device": {"address": device},
+                    "status": status,
+                    "heartbeat": heartbeat,
+                }
+            )
+            row = self.dao.get_device(device)
+            self.assertEqual(received_at, row["last_seen"])
+            self.assertEqual(
+                "offline" if status == "disconnected" else "online",
+                row["status"],
+            )
+
+    def test_stale_expiration_is_per_device_and_preserves_last_seen(self) -> None:
+        stale_seen = "2026-08-23T00:00:00.000Z"
+        recent_seen = "2026-08-23T00:00:25.000Z"
+        self.dao.upsert_device("stale", status="online", last_seen=stale_seen)
+        self.dao.upsert_device("recent", status="online", last_seen=recent_seen)
+        self.dao.upsert_device("unknown-time", status="online", last_seen=None)
+
+        changed = self.dao.mark_stale_devices_offline(
+            "2026-08-23T00:00:20.000Z"
+        )
+
+        self.assertEqual(2, changed)
+        self.assertEqual("offline", self.dao.get_device("stale")["status"])
+        self.assertEqual(stale_seen, self.dao.get_device("stale")["last_seen"])
+        self.assertEqual("online", self.dao.get_device("recent")["status"])
+        self.assertEqual("offline", self.dao.get_device("unknown-time")["status"])
+
+    def test_device_status_freshness_expires_stale_online_status(self) -> None:
+        from gateway.app.device_status import (
+            DEVICE_STATUS_STALE_SECONDS,
+            expire_stale_device_status,
+        )
+
+        now = datetime(2026, 8, 23, 2, 0, tzinfo=timezone.utc)
+        stale_seen = now - timedelta(seconds=DEVICE_STATUS_STALE_SECONDS + 5)
+        recent_seen = now - timedelta(seconds=DEVICE_STATUS_STALE_SECONDS - 5)
+        self.dao.upsert_device(
+            "stale-api", status="online", last_seen=self._iso(stale_seen)
+        )
+        self.dao.upsert_device(
+            "recent-api", status="online", last_seen=self._iso(recent_seen)
+        )
+        changed = expire_stale_device_status(self.dao, now=now)
+
+        self.assertEqual(1, changed)
+        devices = {item["device_id"]: item for item in self.dao.get_devices()}
+        self.assertEqual("offline", devices["stale-api"]["status"])
+        self.assertEqual(self._iso(stale_seen), devices["stale-api"]["last_seen"])
+        self.assertEqual("online", devices["recent-api"]["status"])
 
     def test_cough_bout_metadata_is_persisted(self) -> None:
         message = self.cough_message("aa:bb:cc:dd:ee:01", "m-bout", 11)
@@ -940,6 +1014,107 @@ class BleRoutingTest(unittest.TestCase):
         central._check_timeouts(6.0)
 
         self.assertEqual([1], disconnected)
+
+    def test_status_heartbeat_is_per_running_connection(self) -> None:
+        from ble_central import BleCentral
+        from constants import DEVICE_STATUS_HEARTBEAT_SECONDS
+        from models import ConnectionState
+
+        due = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            phase="running",
+            status_reported=True,
+            last_status_heartbeat_at=10.0,
+        )
+        recent = ConnectionState(
+            2,
+            "aa:bb:cc:dd:ee:02",
+            0,
+            "MyDevice_02",
+            phase="running",
+            status_reported=True,
+            last_status_heartbeat_at=19.0,
+        )
+        discovering = ConnectionState(
+            3,
+            "aa:bb:cc:dd:ee:03",
+            0,
+            "MyDevice_03",
+            phase="discover_characteristics",
+            status_reported=True,
+        )
+        unreported = ConnectionState(
+            4,
+            "aa:bb:cc:dd:ee:04",
+            0,
+            "MyDevice_04",
+            phase="running",
+            status_reported=False,
+        )
+        central = BleCentral.__new__(BleCentral)
+        central.connections = {
+            state.handle: state
+            for state in (due, recent, discovering, unreported)
+        }
+        emitted: list[str] = []
+        central._emit_status_heartbeat = lambda state: emitted.append(state.address)
+
+        central._check_status_heartbeats(
+            10.0 + DEVICE_STATUS_HEARTBEAT_SECONDS
+        )
+
+        self.assertEqual([due.address], emitted)
+        self.assertEqual(20.0, due.last_status_heartbeat_at)
+        self.assertEqual(19.0, recent.last_status_heartbeat_at)
+
+    def test_status_heartbeat_uses_best_effort_transport(self) -> None:
+        from ble_central import BleCentral
+        from models import ConnectionState
+
+        state = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            phase="running",
+            status_reported=True,
+        )
+        sent: list[dict] = []
+        central = BleCentral.__new__(BleCentral)
+        central.session_id = "heartbeat-test"
+        central.sequence = 0
+        central.backend = SimpleNamespace(
+            enabled=True,
+            send_best_effort=lambda message: sent.append(message) or True,
+        )
+
+        central._emit_status_heartbeat(state)
+
+        self.assertEqual(1, len(sent))
+        self.assertEqual("status", sent[0]["event"])
+        self.assertEqual("connected", sent[0]["status"])
+        self.assertTrue(sent[0]["heartbeat"])
+
+    def test_best_effort_heartbeat_never_enters_retry_fifo(self) -> None:
+        from backend_client import JsonLineBackend
+
+        backend = JsonLineBackend("/tmp/unavailable-breathsense-test.sock")
+        backend._send_encoded = lambda _encoded: False
+
+        for sequence in range(20):
+            self.assertFalse(
+                backend.send_best_effort({"event": "status", "sequence": sequence})
+            )
+
+        self.assertEqual(0, backend.queued_count)
+        backend._queue.append(b'{"event":"cough_event"}\n')
+        self.assertFalse(
+            backend.send_best_effort({"event": "status", "heartbeat": True})
+        )
+        self.assertEqual(1, backend.queued_count)
 
     def test_same_characteristic_handle_on_two_connections_routes_by_connection(self) -> None:
         from ble_central import BleCentral

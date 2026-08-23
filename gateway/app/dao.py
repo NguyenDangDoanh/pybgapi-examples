@@ -337,6 +337,21 @@ class Dao:
             self._get_conn().execute("UPDATE devices SET status = 'offline'")
             self._get_conn().commit()
 
+    def mark_stale_devices_offline(self, cutoff_iso: str) -> int:
+        """Expire stale online flags without changing their last-seen time."""
+        with self._lock:
+            cursor = self._get_conn().execute(
+                """
+                UPDATE devices
+                SET status = 'offline'
+                WHERE status = 'online'
+                  AND (last_seen IS NULL OR last_seen < ?)
+                """,
+                (cutoff_iso,),
+            )
+            self._get_conn().commit()
+            return int(cursor.rowcount)
+
     def get_devices(self) -> list[dict[str, Any]]:
         sql = """
             SELECT d.*,

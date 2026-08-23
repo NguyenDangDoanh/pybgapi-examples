@@ -46,3 +46,4 @@ class ConnectionState:
     phase: str = "discover_service"
     phase_deadline: float = 0.0
     status_reported: bool = False
+    last_status_heartbeat_at: float = 0.0

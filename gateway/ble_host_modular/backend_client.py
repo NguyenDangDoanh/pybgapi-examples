@@ -121,6 +121,12 @@ class JsonLineBackend:
         self._enqueue(encoded)
         return False
 
+    def send_best_effort(self, message: dict[str, Any]) -> bool:
+        """Send without queueing or overtaking pending critical messages."""
+        if not self.enabled or self._queue:
+            return False
+        return self._send_encoded(self._encode(message))
+
     def flush_pending(self, max_messages: int = BACKEND_FLUSH_BATCH) -> int:
         """Deliver a bounded FIFO batch so BLE event handling stays responsive."""
         if not self.enabled or not self._queue:

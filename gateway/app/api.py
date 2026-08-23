@@ -8,6 +8,7 @@ from flask import Flask, abort, jsonify, request
 
 from .analytics import Analytics
 from .dao import Dao
+from .device_status import expire_stale_device_status
 from .fleet import Fleet
 
 
@@ -112,6 +113,7 @@ def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
 
     @app.get("/api/devices")
     def list_devices():
+        expire_stale_device_status(dao)
         devices = dao.get_devices()
         warning_cache: dict[str, dict] = {}
         for device in devices:
