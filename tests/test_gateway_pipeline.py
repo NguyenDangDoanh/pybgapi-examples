@@ -497,14 +497,70 @@ class AnalyticsTest(unittest.TestCase):
         self.assertEqual(5.0, status["baseline"])
         self.assertEqual(10.0, status["threshold"])
 
+    def test_abnormal_completed_day_uses_reduced_ewma_alpha(self) -> None:
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        counts = [20] * 7 + [100]
+        for index, count in enumerate(counts):
+            occurred = now - timedelta(days=len(counts) - index, hours=1)
+            for _ in range(count):
+                self._insert(occurred, occurred)
+
+        status = self.analytics.ewma_baseline_status(self.client_id, now=now)
+
+        self.assertEqual(24.0, status["baseline"])
+        self.assertNotEqual(36.0, status["baseline"])
+        self.assertEqual(1, status["consecutive_abnormal_days"])
+
+    def test_normal_completed_day_keeps_standard_ewma_alpha(self) -> None:
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        counts = [20] * 7 + [22]
+        for index, count in enumerate(counts):
+            occurred = now - timedelta(days=len(counts) - index, hours=1)
+            for _ in range(count):
+                self._insert(occurred, occurred)
+
+        status = self.analytics.ewma_baseline_status(self.client_id, now=now)
+
+        self.assertEqual(20.4, status["baseline"])
+        self.assertEqual(0, status["consecutive_abnormal_days"])
+
+    def test_current_day_spike_does_not_update_personal_baseline(self) -> None:
+        now = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
+        for offset in range(7, 0, -1):
+            occurred = now - timedelta(days=offset, hours=1)
+            for _ in range(20):
+                self._insert(occurred, occurred)
+        for _ in range(100):
+            self._insert(now - timedelta(hours=1), now)
+
+        status = self.analytics.ewma_baseline_status(self.client_id, now=now)
+
+        self.assertEqual(20.0, status["baseline"])
+        self.assertEqual(100, status["c24"])
+        self.assertEqual("high_priority", status["warning_level"])
+        self.assertEqual("High Alert", status["warning_label"])
+
+    def test_repeated_abnormal_days_adapt_baseline_slowly(self) -> None:
+        now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+        counts = [20] * 7 + [100, 100, 100]
+        for index, count in enumerate(counts):
+            occurred = now - timedelta(days=len(counts) - index, hours=1)
+            for _ in range(count):
+                self._insert(occurred, occurred)
+
+        status = self.analytics.ewma_baseline_status(self.client_id, now=now)
+
+        self.assertEqual(31.41, status["baseline"])
+        self.assertEqual(3, status["consecutive_abnormal_days"])
+
     def test_warning_normal_review_and_ratio_escalation(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
         scenarios = {
-            "warning_normal": (20, 28, "normal"),
-            "warning_review": (20, 29, "needs_review"),
-            "warning_ratio": (5, 11, "high_priority"),
+            "warning_normal": (20, 28, "normal", "Normal"),
+            "warning_review": (20, 29, "needs_review", "Warning"),
+            "warning_ratio": (5, 11, "high_priority", "High Alert"),
         }
-        for client_id, (historical, current, expected) in scenarios.items():
+        for client_id, (historical, current, expected, label) in scenarios.items():
             for offset in range(7, 0, -1):
                 occurred = now - timedelta(days=offset, hours=1)
                 for _ in range(historical):
@@ -514,6 +570,7 @@ class AnalyticsTest(unittest.TestCase):
             status = self.analytics.ewma_baseline_status(client_id, now=now)
             self.assertEqual(current, status["c24"])
             self.assertEqual(expected, status["warning_level"])
+            self.assertEqual(label, status["warning_label"])
 
     def test_client_baselines_are_isolated(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
@@ -619,7 +676,7 @@ class AnalyticsTest(unittest.TestCase):
         self.assertEqual(20, status["c24"])
         self.assertEqual(2, status["consecutive_abnormal_days"])
         self.assertEqual("high_priority", status["warning_level"])
-        self.assertEqual("High priority", status["warning_label"])
+        self.assertEqual("High Alert", status["warning_label"])
 
 
 class SimulatedDataTest(unittest.TestCase):

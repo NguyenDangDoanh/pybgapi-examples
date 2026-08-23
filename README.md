@@ -81,7 +81,7 @@ responsibilities](gateway/README.md#current-data-flow-and-timestamp-responsibili
 for the complete ingest, storage, API, analytics, and dashboard behavior.
 
 The dashboard compares rolling 24-hour bouts with one Personal EWMA baseline,
-derives Calibrating/Normal/Needs review/High priority device warnings, and provides a
+derives Calibrating/Normal/Warning/High Alert device warnings, and provides a
 separate automatic weekly [treatment-response comparison](gateway/README.md#treatment-response)
 starting from each patient's first valid data day. Its independent Live feed is
 ordered by patient `event_ts` and offers only dates that contain actual events.

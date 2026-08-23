@@ -263,6 +263,12 @@ The only baseline concept is **Personal baseline: Personal EWMA**, with
 `alpha = 0.2`. Seven completed observed days are required for warm-up. It
 continues updating after warm-up and is not a rolling seven-day window.
 Missing/unavailable days are omitted instead of being invented as zero. The
+first seven observed days always use `alpha = 0.2`. After warm-up, each
+completed day is classified against the baseline and threshold that existed
+before that day's update. A normal day keeps `alpha = 0.2`; an abnormal day
+still participates but uses `alpha = 0.05`, preventing one spike from sharply
+raising future thresholds while allowing slow adaptation to sustained change.
+The treatment-response EWMA remains unchanged. The
 finding compares rolling 24-hour count `C24` with EWMA `B`. Its threshold is:
 
 ```text
@@ -272,6 +278,10 @@ T = B + max(B * 0.40, 5)
 The displayed change is `(C24 - B) / B * 100`. The 40% rule is an engineering
 statistical threshold, not a clinical emergency threshold. There is one
 whole-day baseline; Day and Night do not have separate baselines.
+Visible device warning labels are **Calibrating**, **Normal**, **Warning**, and
+**High Alert**. Their stable internal values remain `calibrating`, `normal`,
+`needs_review`, and `high_priority`, so API consumers and row-color rules stay
+compatible.
 The current payload does not contain the number of individual cough sounds
 inside a bout, so the gateway does not infer that quantity or run a second
 bout-grouping state machine.

@@ -17,6 +17,7 @@ except ZoneInfoNotFoundError:
 DAY_START_HOUR = 6
 NIGHT_START_HOUR = 22
 EWMA_ALPHA = 0.2
+EWMA_ABNORMAL_ALPHA = 0.05
 EWMA_WARMUP_DAYS = 7
 THRESHOLD_PERCENT = 0.4
 THRESHOLD_MIN_BUFFER = 5.0
@@ -531,16 +532,24 @@ class Analytics:
         consecutive = 0
         for item in completed_days:
             count = int(item["count"])
-            if running is not None and observed >= warmup_days:
-                historical_threshold = running + max(
-                    running * threshold_pct, min_buffer
-                )
-                consecutive = consecutive + 1 if count > historical_threshold else 0
-            running = (
-                float(count)
-                if running is None
-                else alpha * count + (1.0 - alpha) * running
+            if running is None:
+                running = float(count)
+                observed += 1
+                continue
+            if observed < warmup_days:
+                running = alpha * count + (1.0 - alpha) * running
+                observed += 1
+                continue
+
+            historical_threshold = running + max(
+                running * threshold_pct, min_buffer
             )
+            is_abnormal_day = count > historical_threshold
+            consecutive = consecutive + 1 if is_abnormal_day else 0
+            effective_alpha = (
+                EWMA_ABNORMAL_ALPHA if is_abnormal_day else alpha
+            )
+            running = effective_alpha * count + (1.0 - effective_alpha) * running
             observed += 1
         assert running is not None
         threshold = running + max(running * threshold_pct, min_buffer)
@@ -550,9 +559,9 @@ class Analytics:
         if not above:
             warning_level, warning_label = "normal", "Normal"
         elif (ratio is not None and ratio >= 2.0) or consecutive >= 2:
-            warning_level, warning_label = "high_priority", "High priority"
+            warning_level, warning_label = "high_priority", "High Alert"
         else:
-            warning_level, warning_label = "needs_review", "Needs review"
+            warning_level, warning_label = "needs_review", "Warning"
         return {
             **base,
             "available": True,

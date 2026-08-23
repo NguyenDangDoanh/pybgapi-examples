@@ -47,7 +47,7 @@ class Profile:
 
 PROFILES = (
     Profile("stable", "Stable", (0.48, 0.40, 0.12), 2.0),
-    Profile("needs-review", "Needs review", (0.50, 0.37, 0.13), 4.0),
+    Profile("needs-review", "Warning", (0.50, 0.37, 0.13), 4.0),
     Profile("worsening", "Worsening", (0.55, 0.33, 0.12), 7.0),
     Profile("treatment-improving", "Treatment improving", (0.35, 0.55, 0.10), 1.8),
     Profile("warmup", "Warmup", (0.45, 0.38, 0.17), 2.5),
