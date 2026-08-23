@@ -15,6 +15,18 @@ from .analytics import DISPLAY_TIMEZONE
 from .dao import Dao
 
 SIM_PREFIX = "dashboard-sim-"
+LEGACY_DEMO_MESSAGE_PREFIX = "demo-dashboard-"
+LEGACY_DEMO_CLIENT_IDS = (
+    "demo_patient_above_baseline",
+    "demo_patient_warmup",
+    "demo_patient_week2_incomplete",
+    "demo_patient_week3",
+)
+LEGACY_DEMO_DEVICE_IDS = (
+    "02:00:00:00:00:01",
+    "02:00:00:00:00:02",
+    "02:00:00:00:00:03",
+)
 
 
 @dataclass(frozen=True)
@@ -66,16 +78,40 @@ def _sim_exists(dao: Dao) -> bool:
 
 
 def cleanup_simulated_data(dao: Dao) -> None:
-    """Delete only simulator-owned rows and devices."""
-    pattern = f"{SIM_PREFIX}%"
+    """Delete current simulator rows plus rows from the retired demo generator."""
+    sim_pattern = f"{SIM_PREFIX}%"
+    legacy_pattern = f"{LEGACY_DEMO_MESSAGE_PREFIX}%"
+    client_slots = ", ".join("?" for _ in LEGACY_DEMO_CLIENT_IDS)
+    device_slots = ", ".join("?" for _ in LEGACY_DEMO_DEVICE_IDS)
+    owned_row_where = (
+        f"message_id LIKE ? OR message_id LIKE ? OR client_id IN ({client_slots}) "
+        f"OR device_id IN ({device_slots})"
+    )
+    owned_row_params = (
+        sim_pattern,
+        legacy_pattern,
+        *LEGACY_DEMO_CLIENT_IDS,
+        *LEGACY_DEMO_DEVICE_IDS,
+    )
     with dao._lock:
         connection = dao._get_conn()
-        connection.execute("DELETE FROM cough_events WHERE message_id LIKE ?", (pattern,))
         connection.execute(
-            "DELETE FROM environment_readings WHERE message_id LIKE ?", (pattern,)
+            f"DELETE FROM cough_events WHERE {owned_row_where}", owned_row_params
         )
-        connection.execute("DELETE FROM client_settings WHERE client_id LIKE ?", (pattern,))
-        connection.execute("DELETE FROM devices WHERE device_id LIKE ?", (pattern,))
+        connection.execute(
+            f"DELETE FROM environment_readings WHERE {owned_row_where}",
+            owned_row_params,
+        )
+        connection.execute(
+            f"DELETE FROM client_settings WHERE client_id LIKE ? "
+            f"OR client_id IN ({client_slots})",
+            (sim_pattern, *LEGACY_DEMO_CLIENT_IDS),
+        )
+        connection.execute(
+            f"DELETE FROM devices WHERE device_id LIKE ? "
+            f"OR device_id IN ({device_slots}) OR client_id IN ({client_slots})",
+            (sim_pattern, *LEGACY_DEMO_DEVICE_IDS, *LEGACY_DEMO_CLIENT_IDS),
+        )
         connection.commit()
 
 

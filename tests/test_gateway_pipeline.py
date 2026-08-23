@@ -23,6 +23,8 @@ from gateway.app.analytics import Analytics
 from gateway.app.event_processor import EventProcessor
 from gateway.app.fleet import Fleet
 from gateway.app.simulate_dashboard_data import (
+    LEGACY_DEMO_CLIENT_IDS,
+    LEGACY_DEMO_DEVICE_IDS,
     PROFILES,
     SIM_PREFIX,
     cleanup_simulated_data,
@@ -672,6 +674,47 @@ class SimulatedDataTest(unittest.TestCase):
 
                 duplicate = simulate_history(dao, now=now, seed=17)
                 self.assertFalse(duplicate["created"])
+
+                legacy_client = LEGACY_DEMO_CLIENT_IDS[-1]
+                legacy_device = LEGACY_DEMO_DEVICE_IDS[-1]
+                dao.upsert_device(
+                    legacy_device,
+                    name="Retired demo sensor",
+                    address_type=0,
+                    client_id=legacy_client,
+                    status="offline",
+                    last_seen="2026-08-20T00:00:00.000Z",
+                )
+                dao.insert_event(
+                    {
+                        "message_id": "demo-dashboard-retired-event",
+                        "session_id": "retired-demo",
+                        "device_id": legacy_device,
+                        "client_id": legacy_client,
+                        "cough_type": "dry",
+                        "event_ts": "2026-08-20T00:00:00.000Z",
+                        "received_ts": "2026-08-20T00:00:01.000Z",
+                    }
+                )
+                dao.upsert_device(
+                    "real-device",
+                    name="Real sensor",
+                    address_type=0,
+                    client_id="real-patient",
+                    status="online",
+                    last_seen="2026-08-23T12:00:00.000Z",
+                )
+                dao.insert_event(
+                    {
+                        "message_id": "real-event",
+                        "session_id": "real-session",
+                        "device_id": "real-device",
+                        "client_id": "real-patient",
+                        "cough_type": "wet",
+                        "event_ts": "2026-08-23T11:00:00.000Z",
+                        "received_ts": "2026-08-23T11:00:01.000Z",
+                    }
+                )
                 replaced = simulate_history(dao, now=now, seed=17, replace=True)
                 self.assertTrue(replaced["created"])
                 self.assertEqual(first["events"], replaced["events"])
@@ -687,6 +730,11 @@ class SimulatedDataTest(unittest.TestCase):
                         for row in dao.get_events(stable_client)
                     ],
                 )
+                self.assertFalse(dao.get_events(legacy_client))
+                self.assertEqual(1, len(dao.get_events("real-patient")))
+                device_ids = {row["device_id"] for row in dao.get_devices()}
+                self.assertNotIn(legacy_device, device_ids)
+                self.assertIn("real-device", device_ids)
 
                 profile = PROFILES[0]
                 before = len(dao.get_events(profile.client_id))

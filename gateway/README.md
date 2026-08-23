@@ -312,6 +312,10 @@ stochastic live events:
 python -m gateway.app.simulate_dashboard_data --replace
 ```
 
+`--replace` removes both current `dashboard-sim-*` rows and the exact patient,
+device, and message identifiers created by the retired `seed_demo_data.py`.
+Real patient/device rows are not deleted.
+
 Use `--history-only` to backfill and exit, or `--live-only` to append live data
 without a backfill. `--seed` makes the generated history reproducible;
 `--time-scale` accelerates only live waiting intervals and never creates future
