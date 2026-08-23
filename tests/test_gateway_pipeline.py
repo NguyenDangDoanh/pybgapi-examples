@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 import sqlite3
 import socket
 import struct
@@ -21,10 +22,12 @@ from gateway.app.dao import Dao
 from gateway.app.analytics import Analytics
 from gateway.app.event_processor import EventProcessor
 from gateway.app.fleet import Fleet
-from gateway.app.seed_demo_data import (
-    ABOVE_CLIENT,
-    WARMUP_CLIENT,
-    seed_demo_data,
+from gateway.app.simulate_dashboard_data import (
+    PROFILES,
+    SIM_PREFIX,
+    cleanup_simulated_data,
+    insert_live_event,
+    simulate_history,
 )
 
 SCHEMA = ROOT / "gateway" / "app" / "schema.sql"
@@ -440,6 +443,12 @@ class AnalyticsTest(unittest.TestCase):
         self.assertEqual(2, stats["last_24h_count"])
         self.assertTrue(all(item["day"] == 1 for item in stats["per_day"]))
         self.assertTrue(all(item["night"] == 1 for item in stats["per_day"]))
+        self.assertTrue(
+            all(item["day_types"]["dry"] == 1 for item in stats["per_day"])
+        )
+        self.assertTrue(
+            all(item["night_types"]["wet"] == 1 for item in stats["per_day"])
+        )
 
     def test_ewma_warmup_threshold_and_continuing_update(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
@@ -474,6 +483,35 @@ class AnalyticsTest(unittest.TestCase):
         self.assertFalse(status["available"])
         self.assertEqual("warmup", status["reason"])
         self.assertEqual(1, status["warmup_remaining"])
+
+    def test_seven_identical_days_produce_exact_ewma(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        for offset in range(7, 0, -1):
+            occurred = now - timedelta(days=offset, hours=1)
+            for _ in range(5):
+                self._insert(occurred, occurred)
+        status = self.analytics.ewma_baseline_status(self.client_id, now=now)
+        self.assertTrue(status["available"])
+        self.assertEqual(5.0, status["baseline"])
+        self.assertEqual(10.0, status["threshold"])
+
+    def test_warning_normal_review_and_ratio_escalation(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        scenarios = {
+            "warning_normal": (20, 28, "normal"),
+            "warning_review": (20, 29, "needs_review"),
+            "warning_ratio": (5, 11, "high_priority"),
+        }
+        for client_id, (historical, current, expected) in scenarios.items():
+            for offset in range(7, 0, -1):
+                occurred = now - timedelta(days=offset, hours=1)
+                for _ in range(historical):
+                    self._insert(occurred, occurred, client_id=client_id)
+            for _ in range(current):
+                self._insert(now - timedelta(hours=1), now, client_id=client_id)
+            status = self.analytics.ewma_baseline_status(client_id, now=now)
+            self.assertEqual(current, status["c24"])
+            self.assertEqual(expected, status["warning_level"])
 
     def test_client_baselines_are_isolated(self) -> None:
         now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
@@ -516,13 +554,13 @@ class AnalyticsTest(unittest.TestCase):
         self.assertTrue(status["available"])
         self.assertEqual("2026-08-01", status["first_data_date"])
         self.assertEqual(2, status["evaluation_week_number"])
-        self.assertEqual(7, status["baseline_days"])
-        self.assertEqual(10.0, status["baseline"])
+        self.assertEqual(7, status["reference_observed_days"])
+        self.assertEqual(10.0, status["ewma_reference"])
         self.assertEqual(5.0, status["current"])
         self.assertEqual(-50.0, status["change_percent"])
         self.assertEqual("decreased", status["direction"])
 
-    def test_treatment_response_counts_completed_zero_days(self) -> None:
+    def test_treatment_response_does_not_invent_zero_days(self) -> None:
         first = datetime(2026, 8, 1, 5, 0, tzinfo=timezone.utc)
         self._insert(first, first)
         day_two = datetime(2026, 8, 2, 5, 0, tzinfo=timezone.utc)
@@ -533,11 +571,9 @@ class AnalyticsTest(unittest.TestCase):
             self.client_id,
             now=datetime(2026, 8, 15, 5, 0, tzinfo=timezone.utc),
         )
-        self.assertTrue(status["available"])
-        self.assertEqual(7, status["baseline_days"])
-        self.assertEqual(1.14, status["baseline"])
-        self.assertEqual(0.0, status["current"])
-        self.assertEqual(-100.0, status["change_percent"])
+        self.assertFalse(status["available"])
+        self.assertEqual("reference_warmup", status["reason"])
+        self.assertEqual(2, status["reference_observed_days"])
 
     def test_treatment_response_keeps_separate_seven_day_warmup(self) -> None:
         for day_number in range(1, 6):
@@ -552,58 +588,120 @@ class AnalyticsTest(unittest.TestCase):
         )
         self.assertFalse(status["available"])
         self.assertEqual("warmup", status["reason"])
-        self.assertEqual(5, status["baseline_days"])
+        self.assertEqual(5, status["reference_observed_days"])
         self.assertEqual(2, status["warmup_remaining"])
 
+    def test_event_dates_include_only_dates_that_have_events(self) -> None:
+        now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
+        self._insert(now - timedelta(days=4), now - timedelta(days=4))
+        self._insert(now - timedelta(days=1), now - timedelta(days=1))
+        payload = self.analytics.event_dates(self.client_id)
+        self.assertEqual(2, len(payload["dates"]))
+        self.assertEqual(payload["dates"][0], payload["first_date"])
+        self.assertEqual(payload["dates"][-1], payload["last_date"])
 
-class DemoDataTest(unittest.TestCase):
-    def test_demo_seed_exercises_dashboard_states_without_duplication(self) -> None:
+    def test_warning_uses_c24_and_pre_update_abnormal_streak(self) -> None:
+        now = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
+        for offset in range(9, 2, -1):
+            occurred = now - timedelta(days=offset, hours=1)
+            for _ in range(5):
+                self._insert(occurred, occurred)
+        for offset in (2, 1):
+            occurred = now - timedelta(days=offset, hours=1)
+            for _ in range(14):
+                self._insert(occurred, occurred)
+        for _ in range(20):
+            self._insert(now - timedelta(hours=1), now)
+
+        status = self.analytics.ewma_baseline_status(self.client_id, now=now)
+        self.assertEqual(20, status["c24"])
+        self.assertEqual(2, status["consecutive_abnormal_days"])
+        self.assertEqual("high_priority", status["warning_level"])
+        self.assertEqual("High priority", status["warning_label"])
+
+
+class SimulatedDataTest(unittest.TestCase):
+    def test_simulator_is_reproducible_isolated_and_supports_live_insert(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
-            dao = Dao(str(Path(tempdir) / "demo.db"))
+            dao = Dao(str(Path(tempdir) / "sim.db"))
             dao.init_db(str(SCHEMA))
             try:
-                now = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
-                first = seed_demo_data(dao, now=now)
+                now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+                first = simulate_history(dao, now=now, seed=17)
                 analytics = Analytics(dao)
-                above = analytics.get_client_stats(ABOVE_CLIENT, now=now)
-                warmup = analytics.get_client_stats(WARMUP_CLIENT, now=now)
-
                 self.assertTrue(first["created"])
-                self.assertEqual(219, first["events"])
-                self.assertEqual(22, above["today_count"])
-                self.assertTrue(above["baseline"]["available"])
-                self.assertTrue(above["baseline"]["above_baseline"])
-                self.assertTrue(above["treatment_response"]["available"])
-                self.assertEqual(
-                    "decreased", above["treatment_response"]["direction"]
+                self.assertEqual(6, len(first["patients"]))
+                self.assertTrue(
+                    all(client.startswith(SIM_PREFIX) for client in first["patients"])
                 )
-                self.assertGreater(above["day_night_24h"]["day"], 0)
-                self.assertGreater(above["day_night_24h"]["night"], 0)
-                self.assertTrue(all(above["by_type_24h"].values()))
-                self.assertEqual(4, warmup["today_count"])
+                worsening = analytics.get_client_stats(
+                    f"{SIM_PREFIX}worsening", now=now
+                )
+                warmup = analytics.get_client_stats(f"{SIM_PREFIX}warmup", now=now)
+                stable = analytics.get_client_stats(f"{SIM_PREFIX}stable", now=now)
+                review = analytics.get_client_stats(
+                    f"{SIM_PREFIX}needs-review", now=now
+                )
+                treatment = analytics.get_client_stats(
+                    f"{SIM_PREFIX}treatment-improving", now=now
+                )
+                self.assertEqual("normal", stable["baseline"]["warning_level"])
+                self.assertEqual(
+                    "needs_review", review["baseline"]["warning_level"]
+                )
+                self.assertEqual(
+                    "normal", treatment["baseline"]["warning_level"]
+                )
+                self.assertTrue(worsening["baseline"]["available"])
+                self.assertIn(
+                    worsening["baseline"]["warning_level"],
+                    {"needs_review", "high_priority"},
+                )
                 self.assertFalse(warmup["baseline"]["available"])
-                self.assertEqual(4, warmup["baseline"]["warmup_remaining"])
-                self.assertFalse(warmup["treatment_response"]["available"])
 
-                devices = {item["name"]: item for item in dao.get_devices()}
-                self.assertEqual("online", devices["Demo Sensor 01"]["status"])
-                self.assertEqual(27.4, devices["Demo Sensor 01"]["temperature_c"])
-                self.assertEqual("offline", devices["Demo Sensor 02"]["status"])
+                stable_client = PROFILES[0].client_id
+                signature = [
+                    (
+                        row["event_ts"],
+                        row["cough_type"],
+                        row["prolonged"],
+                        row["duration_s"],
+                    )
+                    for row in dao.get_events(stable_client)
+                ]
 
-                duplicate = seed_demo_data(dao, now=now)
+                duplicate = simulate_history(dao, now=now, seed=17)
                 self.assertFalse(duplicate["created"])
+                replaced = simulate_history(dao, now=now, seed=17, replace=True)
+                self.assertTrue(replaced["created"])
+                self.assertEqual(first["events"], replaced["events"])
                 self.assertEqual(
-                    first["events"],
-                    len(dao.get_events(ABOVE_CLIENT))
-                    + len(dao.get_events(WARMUP_CLIENT)),
+                    signature,
+                    [
+                        (
+                            row["event_ts"],
+                            row["cough_type"],
+                            row["prolonged"],
+                            row["duration_s"],
+                        )
+                        for row in dao.get_events(stable_client)
+                    ],
                 )
 
-                replaced = seed_demo_data(dao, now=now, replace=True)
-                self.assertTrue(replaced["created"])
-                self.assertEqual(
-                    first["events"],
-                    len(dao.get_events(ABOVE_CLIENT))
-                    + len(dao.get_events(WARMUP_CLIENT)),
+                profile = PROFILES[0]
+                before = len(dao.get_events(profile.client_id))
+                self.assertTrue(
+                    insert_live_event(
+                        dao, profile, random.Random(99), 1, now=now
+                    )
+                )
+                self.assertEqual(before + 1, len(dao.get_events(profile.client_id)))
+                cleanup_simulated_data(dao)
+                self.assertFalse(
+                    any(
+                        row["device_id"].startswith(SIM_PREFIX)
+                        for row in dao.get_devices()
+                    )
                 )
             finally:
                 dao.close()

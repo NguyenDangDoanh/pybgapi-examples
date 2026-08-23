@@ -198,13 +198,13 @@ move the bout into the reconnect window.
 The doctor dashboard contains:
 
 - a Device list above the patient view, with assignment, connection status,
-  latest environment values, and last-seen time;
+  warning state, latest environment values, and last-seen time;
 - the patient selector and **Last cough event** (`MAX(event_ts)`) inside Cough
   monitoring;
 - one total KPI and one full-width chart controlled by **24 HOURS / 7 DAYS**;
 - the existing EWMA Statistical finding plus automatic treatment-week
   response; and
-- an independent patient Cough events table with optional date filtering.
+- an independent patient **Live feed** table with optional date filtering.
 
 ### Range anchoring
 
@@ -220,25 +220,29 @@ chart: all chart filters use `event_ts`. A quiet period remains visible because
 the 24-hour right edge follows current time, not the most recent cough.
 
 The 24-hour chart uses clock-aligned local 30-minute buckets (`:00` and `:30`).
-Each bar stacks Dry, Wet, and Unknown and the hover card reports the interval,
-total, and all three type counts. Empty buckets remain present. The 7-day chart
+Each bar stacks Dry, Wet, and Unknown, shows its nonzero total above the stack,
+and has a compact hover card containing only the interval and three type counts.
+Empty buckets remain present. The 7-day chart
 has one bar per completed date, with Day (`06:00-21:59`) and Night
-(`22:00-05:59`) stacked in the same bar; its hover card also reports the three
-cough types. Today is excluded. If fewer than seven completed data dates are
+(`22:00-05:59`) stacked in the same bar. Hovering one segment reports only that
+period's bout total and Dry/Wet/Unknown breakdown. Today is excluded. If fewer
+than seven completed observed dates are
 available, the chart shows a warm-up message instead of fabricating a mature
 seven-bar history.
 
 Only the 7-day view overlays the current personal EWMA as one muted dashed
-horizontal line labelled **Personal baseline**. Neither chart has a Plotly
+horizontal line with a direct **Personal baseline N.N/day** label. Neither chart has a Plotly
 modebar, zoom, pan, or a line joining bar peaks.
 
-### Cough events
+### Live feed
 
 The event table is independent of the chart range. Patient selection filters
 the whole dashboard; **24 HOURS / 7 DAYS** affects only the KPI/chart and
 baseline overlay; the table's Date control affects only the table. With
 **All dates**, Time includes date and clock time. With one date selected, Time
-shows the local clock only. Rows are newest-first by `event_ts`, paginated at
+shows the local clock only. The date dropdown contains only local dates that
+actually have patient events, so future, pre-monitoring, and internal gap dates
+cannot be selected. Rows are newest-first by `event_ts`, paginated at
 25 rows, and contain only Time, Type, and Device. There is no Received time or
 separate bout-duration column. `received_ts` remains stored and available to
 transport/audit APIs.
@@ -255,16 +259,19 @@ delete database records automatically.
 
 ## Personal baseline
 
-The recent personal baseline is an EWMA with `alpha = 0.2`. Seven completed
-observed days are required for warm-up. It continues updating after warm-up
-and is not a rolling seven-day window. Missing/unavailable days are omitted
-instead of being invented as zero. The statistical threshold is:
+The only baseline concept is **Personal baseline: Personal EWMA**, with
+`alpha = 0.2`. Seven completed observed days are required for warm-up. It
+continues updating after warm-up and is not a rolling seven-day window.
+Missing/unavailable days are omitted instead of being invented as zero. The
+finding compares rolling 24-hour count `C24` with EWMA `B`. Its threshold is:
 
 ```text
-EWMA baseline + max(EWMA baseline * 0.40, 5)
+T = B + max(B * 0.40, 5)
 ```
 
-There is one whole-day baseline; Day and Night do not have separate baselines.
+The displayed change is `(C24 - B) / B * 100`. The 40% rule is an engineering
+statistical threshold, not a clinical emergency threshold. There is one
+whole-day baseline; Day and Night do not have separate baselines.
 The current payload does not contain the number of individual cough sounds
 inside a bout, so the gateway does not infer that quantity or run a second
 bout-grouping state machine.
@@ -276,47 +283,46 @@ automatically on the first local calendar date with a valid patient event; the
 dashboard has no treatment-date picker and collects no medication name, dose,
 questionnaire, or treatment episode. The two calculations have different jobs:
 
-- **EWMA finding**: keeps the existing short-term check for whether today's
-  observed bout count is above the patient's recent normal range;
+- **EWMA finding**: checks whether rolling 24-hour count `C24` is above the
+  patient's Personal EWMA threshold;
 - **Treatment response**: compares completed seven-day blocks from the first
   data day.
 
 ```text
-Week 1                    = build the initial personal baseline
-Week 2                    = compare Week 2 daily average with Week 1
-Week 3 and later          = compare the latest completed week with all prior completed weeks
-Change (%)                = (evaluation week - cumulative baseline) / cumulative baseline * 100
+Week 1                    = formation period
+Evaluation reference     = Personal EWMA snapshot at the start of that week
+Week N average            = average across observed dates in the completed week
+Change (%)                = (Week N average - EWMA reference) / EWMA reference * 100
 ```
 
 A partial current week is shown as in progress and is never compared directly.
+Missing monitoring dates are not converted into zero; an incomplete evaluation
+week is labelled unavailable instead of being overinterpreted.
 A negative percentage means fewer bouts and a positive percentage means more
 bouts than the cumulative prior-week baseline. The result is descriptive and
 does not label treatment effective or ineffective.
 
-## Optional dashboard demo data
+## Optional dashboard simulator
 
-Demo data is never created during normal gateway startup. To exercise every
-dashboard state against the configured SQLite database, run:
+Simulated data is never created during normal gateway startup. The default
+command backfills isolated historical scenarios and then keeps generating
+stochastic live events:
 
 ```bash
-python -m gateway.app.seed_demo_data --replace
+python -m gateway.app.simulate_dashboard_data --replace
 ```
 
-Use `--db /path/to/cough_monitor.db` when `GATEWAY_DB_PATH` is not set and the
-database is elsewhere. The command creates only records whose message IDs use
-the reserved `demo-dashboard-` prefix plus these patients/devices:
+Use `--history-only` to backfill and exit, or `--live-only` to append live data
+without a backfill. `--seed` makes the generated history reproducible;
+`--time-scale` accelerates only live waiting intervals and never creates future
+timestamps. `--db /path/to/cough_monitor.db` selects another database.
 
-- `demo_patient_above_baseline` / `Demo Sensor 01`: enough completed days for
-  both EWMA and a decreasing treatment-response example, an above-EWMA current
-  day, all cough types, Day/Night bouts, prolonged labels, a delayed-replay
-  example, and environment readings;
-- `demo_patient_warmup` / `Demo Sensor 02`: three completed observed days so
-  the baseline remains in warm-up, plus offline device status and environment
-  readings.
-
-Running without `--replace` leaves existing demo rows untouched. Running with
-`--replace` deletes and rebuilds only rows created by this generator; real
-patient events and environment readings are not modified.
+The scenarios cover stable, worsening, treatment-improving, EWMA warmup, and
+irregular/missing monitoring. Event times are stochastic and circadian, with
+quiet periods, bursts, sparse nighttime events, per-patient cough-type mixes,
+and rare prolonged bouts. All simulator patients, devices, and messages use the
+reserved `dashboard-sim-` prefix. `--replace` removes only those records; real
+gateway data is untouched.
 
 ## Optional environment variables
 
@@ -338,9 +344,11 @@ python -m unittest discover -s tests -v
 
 The tests cover legacy and extended timestamps, fixed-size bout-flag decoding
 and persistence, wall-clock rolling windows despite delayed replay,
-occurrence-ordered paginated event queries, 30-minute type stacks, completed
-seven-day Day/Night grouping, automatic treatment weeks, EWMA
-warm-up/threshold/missing-day behavior, client isolation, two
+occurrence-ordered paginated event queries and available-date navigation,
+30-minute type stacks, completed seven-day Day/Night/type grouping, automatic
+treatment weeks with EWMA reference snapshots, C24/EWMA warning levels,
+simulator isolation/reproducibility, EWMA warm-up/threshold/missing-day behavior,
+client isolation, two
 nodes using the same event counter, duplicate replay across reconnect, uint16
 wrap, environment persistence and validation, old-database migration,
 concurrent socket clients, per-connection BLE notification routing, optional

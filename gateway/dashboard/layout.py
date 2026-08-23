@@ -75,9 +75,30 @@ def _fleet_section() -> html.Div:
                     {"name": "Device", "id": "device"},
                     {"name": "Status", "id": "status"},
                     {"name": "Patient", "id": "patient"},
+                    {"name": "Warning", "id": "warning"},
+                    {"name": "Warning level", "id": "warning_level"},
                     {"name": "Temperature", "id": "temperature"},
                     {"name": "Humidity", "id": "humidity"},
                     {"name": "Last seen", "id": "last_seen"},
+                ],
+                hidden_columns=["warning_level"],
+                style_data_conditional=[
+                    {
+                        "if": {"filter_query": '{warning_level} = "calibrating"'},
+                        "backgroundColor": "#f0f1f2",
+                    },
+                    {
+                        "if": {"filter_query": '{warning_level} = "normal"'},
+                        "backgroundColor": "#eef8f1",
+                    },
+                    {
+                        "if": {"filter_query": '{warning_level} = "needs_review"'},
+                        "backgroundColor": "#fff5dc",
+                    },
+                    {
+                        "if": {"filter_query": '{warning_level} = "high_priority"'},
+                        "backgroundColor": "#fdeceb",
+                    },
                 ],
                 page_size=8,
                 **_TABLE_KWARGS,
@@ -192,16 +213,17 @@ def _live_feed_section() -> html.Div:
             html.Div(
                 className="events-heading",
                 children=[
-                    html.H2("Cough events"),
+                    html.H2("Live feed"),
                     html.Div(
                         className="event-date-field",
                         children=[
                             html.Label("Date", className="field-label"),
-                            dcc.DatePickerSingle(
+                            dcc.Dropdown(
                                 id=COUGH_EVENT_DATE_ID,
-                                display_format="YYYY-MM-DD",
+                                options=[],
                                 clearable=True,
                                 placeholder="All dates",
+                                className="event-date-dropdown",
                             ),
                         ],
                     ),

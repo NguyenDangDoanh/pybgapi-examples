@@ -3,6 +3,7 @@ body {
     background: #f7f7f4;
     color: #0b0b0b;
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
 }
 
 .app {
@@ -49,10 +50,9 @@ body {
 
 .card h2 {
     margin: 0 0 14px;
-    font-size: 15px;
-    font-weight: 680;
-    text-transform: uppercase;
-    letter-spacing: 0.035em;
+    font-size: 18px;
+    font-weight: 650;
+    letter-spacing: -0.01em;
 }
 
 #fleet-table .dash-cell-value {
@@ -73,7 +73,7 @@ body {
 .field-label {
     display: block;
     margin-bottom: 6px;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 650;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -107,7 +107,7 @@ body {
 }
 
 .primary-kpi strong {
-    font-size: 32px;
+    font-size: 38px;
     line-height: 1.05;
     letter-spacing: -0.04em;
 }
@@ -236,15 +236,14 @@ body {
     margin-bottom: 0;
 }
 
-.event-date-field .DateInput,
-.event-date-field .DateInput_input {
-    width: 142px;
+.event-date-dropdown {
+    width: 170px;
+    font-size: 13px;
 }
 
-.event-date-field .DateInput_input {
-    height: 34px;
-    padding: 0 10px;
-    font-size: 13px;
+.finding > strong {
+    font-size: 17px;
+    font-weight: 650;
 }
 
 .event-empty {

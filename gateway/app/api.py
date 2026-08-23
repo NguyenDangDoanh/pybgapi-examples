@@ -82,6 +82,10 @@ def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
     def client_stats(client_id: str):
         return jsonify(analytics.get_client_stats(client_id))
 
+    @app.get("/api/clients/<client_id>/event-dates")
+    def client_event_dates(client_id: str):
+        return jsonify(analytics.event_dates(client_id))
+
     @app.get("/api/clients/<client_id>/treatment")
     def get_client_treatment(client_id: str):
         return jsonify(dao.get_client_settings(client_id))
@@ -108,7 +112,29 @@ def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
 
     @app.get("/api/devices")
     def list_devices():
-        return jsonify(dao.get_devices())
+        devices = dao.get_devices()
+        warning_cache: dict[str, dict] = {}
+        for device in devices:
+            client_id = device.get("client_id")
+            if not client_id:
+                device.update(
+                    warning_level="unavailable",
+                    warning_label="No patient data",
+                )
+                continue
+            if client_id not in warning_cache:
+                warning_cache[client_id] = analytics.ewma_baseline_status(client_id)
+            warning = warning_cache[client_id]
+            device.update(
+                warning_level=warning.get("warning_level", "unavailable"),
+                warning_label=warning.get("warning_label", "No recent data"),
+                warning_baseline=warning.get("baseline"),
+                warning_threshold=warning.get("threshold"),
+                warning_c24=warning.get("c24"),
+                warning_ratio=warning.get("ratio"),
+                consecutive_abnormal_days=warning.get("consecutive_abnormal_days", 0),
+            )
+        return jsonify(devices)
 
     @app.post("/api/devices/<device_id>/assign")
     def assign_device(device_id: str):

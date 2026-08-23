@@ -252,6 +252,20 @@ class Dao:
             row = self._get_conn().execute(sql, params).fetchone()
         return int(row[0]) if row is not None else 0
 
+    def get_event_timestamps(self, client_id: str) -> list[str]:
+        """Return all valid occurrence timestamps for event-date navigation."""
+        with self._lock:
+            rows = self._get_conn().execute(
+                """
+                SELECT event_ts
+                FROM cough_events
+                WHERE client_id = ? AND event_ts IS NOT NULL
+                ORDER BY event_ts DESC
+                """,
+                (client_id,),
+            ).fetchall()
+        return [str(row[0]) for row in rows if row[0]]
+
     def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
         limit = self._clamp_limit(limit)
         with self._lock:
