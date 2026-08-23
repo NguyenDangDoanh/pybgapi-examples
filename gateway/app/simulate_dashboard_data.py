@@ -36,6 +36,7 @@ class Profile:
     label: str
     type_weights: tuple[float, float, float]
     live_rate_per_hour: float
+    live_c24_cap: int
 
     @property
     def client_id(self) -> str:
@@ -47,12 +48,24 @@ class Profile:
 
 
 PROFILES = (
-    Profile("stable", "Stable", (0.48, 0.40, 0.12), 2.0),
-    Profile("needs-review", "Warning", (0.50, 0.37, 0.13), 4.0),
-    Profile("worsening", "Worsening", (0.55, 0.33, 0.12), 7.0),
-    Profile("treatment-improving", "Treatment improving", (0.35, 0.55, 0.10), 1.8),
-    Profile("warmup", "Warmup", (0.45, 0.38, 0.17), 2.5),
-    Profile("irregular-missing", "Irregular / missing", (0.42, 0.36, 0.22), 1.0),
+    Profile("stable", "Stable", (0.48, 0.40, 0.12), 2.0, 15),
+    Profile("needs-review", "Warning", (0.50, 0.37, 0.13), 4.0, 30),
+    Profile("worsening", "Worsening", (0.55, 0.33, 0.12), 7.0, 30),
+    Profile(
+        "treatment-improving",
+        "Treatment improving",
+        (0.35, 0.55, 0.10),
+        1.8,
+        9,
+    ),
+    Profile("warmup", "Warmup", (0.45, 0.38, 0.17), 2.5, 12),
+    Profile(
+        "irregular-missing",
+        "Irregular / missing",
+        (0.42, 0.36, 0.22),
+        1.0,
+        8,
+    ),
 )
 
 _HOUR_WEIGHTS = (
@@ -333,6 +346,14 @@ def insert_live_event(
     if now_utc.tzinfo is None:
         now_utc = now_utc.replace(tzinfo=timezone.utc)
     _upsert_profile_device(dao, profile, now_utc)
+    window_start = now_utc - timedelta(hours=24)
+    current_c24 = dao.count_events_by_occurrence(
+        profile.client_id,
+        start_time=_utc_iso(window_start),
+        end_time=_utc_iso(now_utc),
+    )
+    if current_c24 >= profile.live_c24_cap:
+        return False
     counter = (_event_counter(dao, profile.device_id) + 1) & 0xFFFF
     return _insert_event(
         dao,
@@ -389,8 +410,9 @@ def run_live(dao: Dao, *, seed: int, time_scale: float = 1.0) -> None:
             clock.sleep(min(delay, 1.0))
             continue
         serial += 1
-        insert_live_event(dao, profile, rng, serial)
-        print(f"live event: {profile.client_id}", flush=True)
+        created = insert_live_event(dao, profile, rng, serial)
+        if created:
+            print(f"live event: {profile.client_id}", flush=True)
         next_due[profile.key] = clock.monotonic() + (
             rng.expovariate(profile.live_rate_per_hour / 3600.0) / time_scale
         )

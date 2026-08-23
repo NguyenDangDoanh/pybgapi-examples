@@ -47,6 +47,10 @@ from utils import (
 LOG = logging.getLogger("breathsense.ble_central")
 
 
+class NcpTransportLost(RuntimeError):
+    """Raised when the BGM220 serial/BGAPI transport is unavailable."""
+
+
 class BleCentral:
     """Connect to several xG26 nodes and subscribe independently to each."""
 
@@ -80,6 +84,7 @@ class BleCentral:
         self.utc_sync_date = datetime.now(timezone.utc).date()
         self.session_id = str(uuid.uuid4())
         self.sequence = 0
+        self._closed = False
 
     @property
     def connecting(self) -> bool:
@@ -89,25 +94,40 @@ class BleCentral:
         try:
             self.lib.open()
         except (OSError, ConnectorException) as exc:
-            raise SystemExit(
-                f"Cannot open BGM220 NCP at {self.args.serial_port}: {exc}\n"
-                "Check the serial path, dialout membership, and whether "
-                "another program is using the port."
+            self.close()
+            raise NcpTransportLost(
+                f"Cannot open BGM220 NCP at {self.args.serial_port}: {exc}"
             ) from exc
 
         LOG.info("Opened NCP serial port: %s", self.args.serial_port)
-        LOG.info("BLE host session=%s max_connections=%d", self.session_id, self.args.max_connections)
+        LOG.info(
+            "BLE host session=%s max_connections=%d",
+            self.session_id,
+            self.args.max_connections,
+        )
         self.boot_deadline = time.monotonic() + BOOT_TIMEOUT_SECONDS
 
         try:
-            self.lib.bt.system.reboot()
-        except bgapi.bglib.CommandFailedError as exc:
-            self.close()
-            raise SystemExit(f"NCP reboot failed: 0x{exc.errorcode:04x}") from exc
+            try:
+                self.lib.bt.system.reboot()
+            except bgapi.bglib.CommandFailedError as exc:
+                if not self._ncp_transport_alive():
+                    raise NcpTransportLost(
+                        "BGM220 NCP transport lost during reboot"
+                    ) from exc
+                raise SystemExit(
+                    f"NCP reboot failed: 0x{exc.errorcode:04x}"
+                ) from exc
+            except (OSError, ConnectorException) as exc:
+                raise NcpTransportLost(
+                    f"BGM220 NCP transport failed during reboot: {exc}"
+                ) from exc
 
-        try:
             while True:
                 now = time.monotonic()
+                if not self._ncp_transport_alive():
+                    LOG.error("BGM220 NCP transport lost")
+                    raise NcpTransportLost("BGM220 NCP transport lost")
                 if not self.booted and now > self.boot_deadline:
                     raise SystemExit(
                         "NCP boot timeout. Check BGM220 firmware, baud rate, "
@@ -130,7 +150,14 @@ class BleCentral:
                 if self.backend.enabled:
                     self.backend.flush_pending()
 
-                event = self.lib.get_event(timeout=0.5)
+                try:
+                    event = self.lib.get_event(timeout=0.5)
+                except Exception as exc:
+                    if not self._ncp_transport_alive():
+                        raise NcpTransportLost(
+                            "BGM220 NCP transport lost while reading events"
+                        ) from exc
+                    raise
                 if event is not None:
                     self.dispatch(event)
         except KeyboardInterrupt:
@@ -139,25 +166,61 @@ class BleCentral:
             self.close()
 
     def close(self) -> None:
-        self.stop_scan()
-        for state in list(self.connections.values()):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+
+        try:
+            self.stop_scan()
+        except Exception:
+            LOG.debug("Scanner cleanup failed", exc_info=True)
+
+        connections = getattr(self, "connections", {})
+        for state in list(connections.values()):
             if state.status_reported:
-                self._emit_status(state, "disconnected")
-                state.status_reported = False
-        for handle in list(self.connections):
+                try:
+                    self._emit_status(state, "disconnected")
+                except Exception:
+                    LOG.exception(
+                        "[%s] Failed to publish disconnected status during cleanup",
+                        state.address,
+                    )
+                finally:
+                    state.status_reported = False
+        for handle in list(connections):
             try:
                 self.lib.bt.connection.close(handle)
             except Exception:
                 pass
-        self.connections.clear()
-        self.connection_by_address.clear()
-        self.pending_node = None
-        self.backend.close()
+        connections.clear()
+        connection_by_address = getattr(self, "connection_by_address", None)
+        if connection_by_address is not None:
+            connection_by_address.clear()
+        if hasattr(self, "pending_node"):
+            self.pending_node = None
         try:
-            self.lib.close()
+            backend = getattr(self, "backend", None)
+            if backend is not None:
+                backend.close()
+        except Exception:
+            LOG.debug("Backend cleanup failed", exc_info=True)
+        try:
+            library = getattr(self, "lib", None)
+            if library is not None:
+                library.close()
         except Exception:
             pass
         LOG.info("BLE Central closed.")
+
+    def _ncp_transport_alive(self) -> bool:
+        """Return whether the BGAPI reader thread is still running."""
+        handler = getattr(getattr(self, "lib", None), "conn_handler", None)
+        if handler is None:
+            return False
+        try:
+            return bool(handler.is_alive())
+        except Exception:
+            return False
 
     def _has_connection_capacity(self) -> bool:
         return len(self.connections) < self.args.max_connections
@@ -571,6 +634,8 @@ class BleCentral:
 
     def _check_status_heartbeats(self, now: float) -> None:
         """Best-effort proof of life for each fully configured BLE link."""
+        if not self._ncp_transport_alive():
+            return
         for state in list(self.connections.values()):
             if state.phase != "running" or not state.status_reported:
                 continue

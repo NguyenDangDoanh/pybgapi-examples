@@ -929,6 +929,60 @@ class SimulatedDataTest(unittest.TestCase):
             finally:
                 dao.close()
 
+    def test_live_caps_preserve_each_simulated_warning_scenario(self) -> None:
+        expected_levels = {
+            "stable": "normal",
+            "needs-review": "needs_review",
+            "worsening": "high_priority",
+            "treatment-improving": "normal",
+            "warmup": "calibrating",
+            "irregular-missing": "normal",
+        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            dao = Dao(str(Path(tempdir) / "sim-caps.db"))
+            dao.init_db(str(SCHEMA))
+            try:
+                now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
+                simulate_history(dao, now=now, seed=17)
+                analytics = Analytics(dao)
+                serial = 1000
+                for profile in PROFILES:
+                    for _ in range(100):
+                        serial += 1
+                        insert_live_event(
+                            dao,
+                            profile,
+                            random.Random(serial),
+                            serial,
+                            now=now,
+                        )
+                    current_c24 = dao.count_events_by_occurrence(
+                        profile.client_id,
+                        start_time=self._iso(now - timedelta(hours=24)),
+                        end_time=self._iso(now),
+                    )
+                    self.assertLessEqual(current_c24, profile.live_c24_cap)
+                    self.assertFalse(
+                        insert_live_event(
+                            dao,
+                            profile,
+                            random.Random(serial + 1),
+                            serial + 1,
+                            now=now,
+                        )
+                    )
+                    status = analytics.ewma_baseline_status(
+                        profile.client_id,
+                        now=now,
+                    )
+                    self.assertEqual(
+                        expected_levels[profile.key],
+                        status["warning_level"],
+                        profile.key,
+                    )
+            finally:
+                dao.close()
+
 
 class SocketConcurrencyTest(unittest.TestCase):
     def test_two_clients_can_deliver_without_blocking_each_other(self) -> None:
@@ -993,7 +1047,7 @@ class BleRoutingTest(unittest.TestCase):
 
     def test_connector_open_error_is_reported_without_secondary_failure(self) -> None:
         from bgapi.connector import ConnectorException
-        from ble_central import BleCentral
+        from ble_central import BleCentral, NcpTransportLost
 
         class UnavailableNcp:
             @staticmethod
@@ -1005,9 +1059,144 @@ class BleRoutingTest(unittest.TestCase):
         central.args = SimpleNamespace(serial_port="/dev/ttyACM0")
 
         with self.assertRaisesRegex(
-            SystemExit, "Cannot open BGM220 NCP at /dev/ttyACM0"
+            NcpTransportLost, "Cannot open BGM220 NCP at /dev/ttyACM0"
         ):
             central.run()
+
+        self.assertTrue(central._closed)
+
+    def test_dead_bgapi_reader_is_not_a_live_transport(self) -> None:
+        from ble_central import BleCentral
+
+        central = BleCentral.__new__(BleCentral)
+        central.lib = SimpleNamespace(
+            conn_handler=SimpleNamespace(is_alive=lambda: False)
+        )
+
+        self.assertFalse(central._ncp_transport_alive())
+
+    def test_transport_loss_reports_every_running_node_offline_and_cleans_up(self) -> None:
+        from ble_central import BleCentral, NcpTransportLost
+        from models import ConnectionState
+
+        first = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            phase="running",
+            status_reported=True,
+        )
+        second = ConnectionState(
+            2,
+            "aa:bb:cc:dd:ee:02",
+            0,
+            "MyDevice_02",
+            phase="running",
+            status_reported=True,
+        )
+        statuses: list[tuple[str, str]] = []
+        closed_handles: list[int] = []
+        backend_closed: list[bool] = []
+        library_closed: list[bool] = []
+        central = BleCentral.__new__(BleCentral)
+        central.args = SimpleNamespace(
+            serial_port="/dev/ttyACM0",
+            max_connections=2,
+        )
+        central.session_id = "transport-loss-test"
+        central.booted = True
+        central.scanning = False
+        central.pending_node = None
+        central.connections = {1: first, 2: second}
+        central.connection_by_address = {
+            first.address: first.handle,
+            second.address: second.handle,
+        }
+        central._closed = False
+        central._emit_status = lambda state, status: statuses.append(
+            (state.address, status)
+        )
+        central.backend = SimpleNamespace(
+            enabled=False,
+            close=lambda: backend_closed.append(True),
+        )
+        central.lib = SimpleNamespace(
+            open=lambda: None,
+            conn_handler=SimpleNamespace(is_alive=lambda: False),
+            bt=SimpleNamespace(
+                system=SimpleNamespace(reboot=lambda: None),
+                connection=SimpleNamespace(
+                    close=lambda handle: closed_handles.append(handle)
+                ),
+            ),
+            close=lambda: library_closed.append(True),
+        )
+
+        with self.assertRaisesRegex(NcpTransportLost, "transport lost"):
+            central.run()
+
+        self.assertEqual(
+            {
+                (first.address, "disconnected"),
+                (second.address, "disconnected"),
+            },
+            set(statuses),
+        )
+        self.assertEqual([1, 2], closed_handles)
+        self.assertEqual({}, central.connections)
+        self.assertEqual({}, central.connection_by_address)
+        self.assertEqual([True], backend_closed)
+        self.assertEqual([True], library_closed)
+
+    def test_supervisor_recreates_central_until_transport_returns(self) -> None:
+        from ble_central import NcpTransportLost
+        from constants import NCP_RETRY_SECONDS
+        from main import supervise
+
+        created: list[int] = []
+        sleeps: list[float] = []
+
+        class RecoveringCentral:
+            def __init__(self, _args) -> None:
+                self.attempt = len(created) + 1
+                created.append(self.attempt)
+
+            def run(self) -> None:
+                if self.attempt < 3:
+                    raise NcpTransportLost(f"attempt {self.attempt}")
+
+        supervise(
+            SimpleNamespace(),
+            central_factory=RecoveringCentral,
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual([1, 2, 3], created)
+        self.assertEqual([NCP_RETRY_SECONDS, NCP_RETRY_SECONDS], sleeps)
+
+    def test_supervisor_ctrl_c_exits_without_restart(self) -> None:
+        from main import supervise
+
+        created: list[bool] = []
+        sleeps: list[float] = []
+
+        class InterruptedCentral:
+            def __init__(self, _args) -> None:
+                created.append(True)
+
+            @staticmethod
+            def run() -> None:
+                raise KeyboardInterrupt
+
+        supervise(
+            SimpleNamespace(),
+            central_factory=InterruptedCentral,
+            sleep=sleeps.append,
+        )
+
+        self.assertEqual([True], created)
+        self.assertEqual([], sleeps)
 
     def test_pending_connection_timeout_unblocks_future_scans(self) -> None:
         from ble_central import BleCentral
@@ -1107,6 +1296,7 @@ class BleRoutingTest(unittest.TestCase):
         )
 
         central.close()
+        central.close()
 
         self.assertEqual([(reported.address, "disconnected")], statuses)
         self.assertFalse(reported.status_reported)
@@ -1155,6 +1345,9 @@ class BleRoutingTest(unittest.TestCase):
             status_reported=False,
         )
         central = BleCentral.__new__(BleCentral)
+        central.lib = SimpleNamespace(
+            conn_handler=SimpleNamespace(is_alive=lambda: True)
+        )
         central.connections = {
             state.handle: state
             for state in (due, recent, discovering, unreported)
@@ -1169,6 +1362,32 @@ class BleRoutingTest(unittest.TestCase):
         self.assertEqual([due.address], emitted)
         self.assertEqual(20.0, due.last_status_heartbeat_at)
         self.assertEqual(19.0, recent.last_status_heartbeat_at)
+
+    def test_dead_transport_suppresses_connected_heartbeats(self) -> None:
+        from ble_central import BleCentral
+        from models import ConnectionState
+
+        state = ConnectionState(
+            1,
+            "aa:bb:cc:dd:ee:01",
+            0,
+            "MyDevice_01",
+            phase="running",
+            status_reported=True,
+            last_status_heartbeat_at=0.0,
+        )
+        central = BleCentral.__new__(BleCentral)
+        central.lib = SimpleNamespace(
+            conn_handler=SimpleNamespace(is_alive=lambda: False)
+        )
+        central.connections = {state.handle: state}
+        emitted: list[str] = []
+        central._emit_status_heartbeat = lambda item: emitted.append(item.address)
+
+        central._check_status_heartbeats(100.0)
+
+        self.assertEqual([], emitted)
+        self.assertEqual(0.0, state.last_status_heartbeat_at)
 
     def test_status_heartbeat_uses_best_effort_transport(self) -> None:
         from ble_central import BleCentral

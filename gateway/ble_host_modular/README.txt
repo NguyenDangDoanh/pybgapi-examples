@@ -33,6 +33,9 @@ Important:
 - The optional writable Time characteristic receives little-endian uint32 Unix
   time after notifications are enabled and again at each UTC midnight. Its
   absence is supported for backward compatibility.
+- If the BGM220 reader thread dies or the serial adapter is unplugged, all
+  running nodes are reported disconnected and a fresh host retries the same
+  serial path every 2 seconds until the NCP returns.
 - Each connection owns its discovery/time-sync state. Time writes are
   asynchronous, and failure on one node does not stop the others.
 - Firmware must keep a monotonic clock running across BLE disconnects and store

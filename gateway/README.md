@@ -353,7 +353,21 @@ gateway data is untouched.
 While live simulation is running, it refreshes each simulated device's
 connectivity status every 10 seconds without creating cough or environment
 rows. This keeps simulated devices Online under the same 30-second freshness
-rule as physical devices without changing their analytics.
+rule as physical devices without changing their analytics. Per-profile rolling
+24-hour caps keep accelerated live generation from pushing every scenario into
+High Alert; once a cap is reached, only connectivity heartbeats continue until
+older cough events leave the 24-hour window.
+
+## BGM220 transport recovery
+
+The BLE host supervises the pyBGAPI reader thread rather than relying only on
+`BGLib.is_open()`. If the BGM220 is unplugged or the reader thread dies, the
+current host stops connected heartbeats, reports every running node
+disconnected, clears stale BLE state, and closes the old BGLib instance. The
+supervisor then creates a new `BleCentral` every 2 seconds until the original
+serial path is available again. Reconnection performs the complete boot, scan,
+GATT discovery, notification setup, and optional time-sync sequence before a
+new connected status is emitted.
 
 ## Optional environment variables
 
