@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from pathlib import Path
 
 from gateway.dashboard.dash_app import create_dash
 
 from .analytics import Analytics
 from .api import create_app
+from .database_path import resolve_database_path
 from .dao import Dao
 from .event_processor import EventProcessor
 from .fleet import Fleet
@@ -20,8 +20,7 @@ from .upload_worker import worker_from_environment
 
 HOST = os.environ.get("GATEWAY_HOST", "0.0.0.0")
 PORT = int(os.environ.get("GATEWAY_PORT", "8050"))
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DB_PATH = os.environ.get("GATEWAY_DB_PATH", str(REPO_ROOT / "cough_monitor.db"))
+DB_PATH = str(resolve_database_path())
 SOCKET_PATH = os.environ.get("GATEWAY_SOCKET_PATH", "/tmp/cough_gw.sock")
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "schema.sql")
 
@@ -31,6 +30,7 @@ def main() -> None:
         level=getattr(logging, os.environ.get("GATEWAY_LOG_LEVEL", "INFO").upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    logging.getLogger(__name__).info("Using SQLite database: %s", DB_PATH)
     dao = Dao(DB_PATH)
     dao.init_db(SCHEMA_PATH)
     dao.mark_all_offline()

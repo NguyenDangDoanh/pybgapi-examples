@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from gateway.app.dao import Dao
 from gateway.app.analytics import Analytics
+from gateway.app.database_path import REPO_ROOT, resolve_database_path
 from gateway.app.event_processor import EventProcessor
 from gateway.app.fleet import Fleet
 from gateway.app.device_assignments import REAL_DEVICE_CLIENT_MAP
@@ -30,6 +31,11 @@ from gateway.app.simulate_dashboard_data import (
     SIM_PREFIX,
     cleanup_simulated_data,
     simulate_history,
+)
+from gateway.app.reset_dashboard_data import (
+    RESET_TABLES,
+    main as reset_dashboard_main,
+    reset_dashboard_data,
 )
 
 SCHEMA = ROOT / "gateway" / "app" / "schema.sql"
@@ -1096,6 +1102,287 @@ class SimulatedDataTest(unittest.TestCase):
                 )
             finally:
                 dao.close()
+
+    def test_replace_is_idempotent_for_every_simulator_owned_table(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            dao = Dao(str(Path(tempdir) / "replace.db"))
+            dao.init_db(str(SCHEMA))
+            try:
+                now = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+
+                def simulator_counts() -> dict[str, int]:
+                    with dao._lock:
+                        connection = dao._get_conn()
+                        return {
+                            "cough_events": int(
+                                connection.execute(
+                                    "SELECT COUNT(*) FROM cough_events "
+                                    "WHERE message_id LIKE ? OR device_id LIKE ?",
+                                    (f"{SIM_PREFIX}%", f"{SIM_PREFIX}%"),
+                                ).fetchone()[0]
+                            ),
+                            "environment_readings": int(
+                                connection.execute(
+                                    "SELECT COUNT(*) FROM environment_readings "
+                                    "WHERE message_id LIKE ? OR device_id LIKE ?",
+                                    (f"{SIM_PREFIX}%", f"{SIM_PREFIX}%"),
+                                ).fetchone()[0]
+                            ),
+                            "devices": int(
+                                connection.execute(
+                                    "SELECT COUNT(*) FROM devices WHERE device_id LIKE ?",
+                                    (f"{SIM_PREFIX}%",),
+                                ).fetchone()[0]
+                            ),
+                        }
+
+                first = simulate_history(dao, now=now, seed=23, replace=True)
+                first_counts = simulator_counts()
+                second = simulate_history(dao, now=now, seed=23, replace=True)
+                self.assertEqual(first["events"], second["events"])
+                self.assertEqual(first_counts, simulator_counts())
+                self.assertGreater(first_counts["cough_events"], 0)
+                self.assertEqual(len(PROFILES), first_counts["environment_readings"])
+                self.assertEqual(len(PROFILES), first_counts["devices"])
+            finally:
+                dao.close()
+
+    def test_legacy_cleanup_removes_reserved_rows_and_keeps_real_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            dao = Dao(str(Path(tempdir) / "legacy.db"))
+            dao.init_db(str(SCHEMA))
+            try:
+                legacy_client = LEGACY_DEMO_CLIENT_IDS[0]
+                legacy_device = LEGACY_DEMO_DEVICE_IDS[0]
+                dao.upsert_device(legacy_device, client_id=legacy_client)
+                dao.upsert_device("real-device", client_id="real-patient")
+                for message_id, device_id, client_id in (
+                    ("demo-dashboard-old", legacy_device, legacy_client),
+                    ("real-event", "real-device", "real-patient"),
+                ):
+                    dao.insert_event(
+                        {
+                            "message_id": message_id,
+                            "session_id": "session",
+                            "device_id": device_id,
+                            "client_id": client_id,
+                            "event_ts": "2026-08-27T12:00:00.000Z",
+                            "received_ts": "2026-08-27T12:00:01.000Z",
+                        }
+                    )
+                    dao.insert_environment(
+                        {
+                            "message_id": f"{message_id}-environment",
+                            "session_id": "session",
+                            "device_id": device_id,
+                            "client_id": client_id,
+                            "event_ts": "2026-08-27T12:00:00.000Z",
+                            "received_ts": "2026-08-27T12:00:01.000Z",
+                        }
+                    )
+                dao.set_treatment_start_date(legacy_client, "2026-08-01")
+                dao.set_treatment_start_date("real-patient", "2026-08-02")
+                dao.set_treatment_start_date(PROFILES[0].client_id, "2026-08-03")
+                with dao._lock:
+                    connection = dao._get_conn()
+                    for event_id, payload_json in (
+                        (
+                            "legacy-uuid",
+                            f'{{"client_id":"{legacy_client}"}}',
+                        ),
+                        ("real-queued", '{"message_id":"real-queued"}'),
+                    ):
+                        connection.execute(
+                            """
+                            INSERT INTO telemetry_outbox (
+                                event_id, event_ts, payload_json, created_at
+                            ) VALUES (?, ?, ?, ?)
+                            """,
+                            (
+                                event_id,
+                                "2026-08-27T12:00:00.000Z",
+                                payload_json,
+                                "2026-08-27T12:00:01.000Z",
+                            ),
+                        )
+                        connection.execute(
+                            "INSERT INTO telemetry_receipts (event_id, received_at) "
+                            "VALUES (?, ?)",
+                            (event_id, "2026-08-27T12:00:02.000Z"),
+                        )
+                    connection.commit()
+
+                cleanup_simulated_data(dao)
+
+                self.assertFalse(dao.get_events(legacy_client))
+                self.assertEqual(1, len(dao.get_events("real-patient")))
+                self.assertNotIn(
+                    legacy_device, {row["device_id"] for row in dao.get_devices()}
+                )
+                self.assertIsNone(
+                    dao.get_client_settings(legacy_client)["treatment_start_date"]
+                )
+                self.assertIsNone(
+                    dao.get_client_settings(PROFILES[0].client_id)[
+                        "treatment_start_date"
+                    ]
+                )
+                self.assertEqual(
+                    "2026-08-02",
+                    dao.get_client_settings("real-patient")["treatment_start_date"],
+                )
+                with dao._lock:
+                    connection = dao._get_conn()
+                    outbox_ids = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT event_id FROM telemetry_outbox"
+                        ).fetchall()
+                    }
+                    receipt_ids = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT event_id FROM telemetry_receipts"
+                        ).fetchall()
+                    }
+                self.assertEqual({"real-queued"}, outbox_ids)
+                self.assertEqual({"real-queued"}, receipt_ids)
+            finally:
+                dao.close()
+
+
+class DashboardResetTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tempdir.name) / "reset.db"
+        self.dao = Dao(str(self.db_path))
+        self.dao.init_db(str(SCHEMA))
+        self.dao.upsert_device(
+            "real-device",
+            client_id="real-patient",
+            status="online",
+            last_seen="2026-08-27T12:00:00.000Z",
+        )
+        self.dao.insert_event(
+            {
+                "message_id": "real-event",
+                "session_id": "real-session",
+                "device_id": "real-device",
+                "client_id": "real-patient",
+                "cough_type": "dry",
+                "event_ts": "2026-08-27T12:00:00.000Z",
+                "received_ts": "2026-08-27T12:00:01.000Z",
+            }
+        )
+        self.dao.insert_environment(
+            {
+                "message_id": "real-environment",
+                "session_id": "real-session",
+                "device_id": "real-device",
+                "client_id": "real-patient",
+                "event_ts": "2026-08-27T12:00:00.000Z",
+                "received_ts": "2026-08-27T12:00:01.000Z",
+                "temperature_c": 27.5,
+                "humidity_percent": 60.0,
+            }
+        )
+        self.dao.set_treatment_start_date("real-patient", "2026-08-27")
+        with self.dao._lock:
+            connection = self.dao._get_conn()
+            connection.execute(
+                """
+                INSERT INTO telemetry_outbox (
+                    event_id, event_ts, payload_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    "real-event",
+                    "2026-08-27T12:00:00.000Z",
+                    '{"message_id":"real-event"}',
+                    "2026-08-27T12:00:01.000Z",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO telemetry_receipts (event_id, received_at) VALUES (?, ?)",
+                ("real-event", "2026-08-27T12:00:02.000Z"),
+            )
+            connection.commit()
+
+    def tearDown(self) -> None:
+        self.dao.close()
+        self.tempdir.cleanup()
+
+    def _counts(self) -> dict[str, int]:
+        with self.dao._lock:
+            connection = self.dao._get_conn()
+            return {
+                table: int(
+                    connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                )
+                for table in RESET_TABLES
+            }
+
+    def test_confirmation_is_required_and_full_reset_clears_every_table(self) -> None:
+        self.assertEqual(2, reset_dashboard_main(["--db", str(self.db_path)]))
+        self.assertTrue(all(count == 1 for count in self._counts().values()))
+
+        self.assertEqual(
+            0,
+            reset_dashboard_main(
+                ["--db", str(self.db_path), "--yes", "--no-vacuum"]
+            ),
+        )
+        self.assertTrue(all(count == 0 for count in self._counts().values()))
+        with self.dao._lock:
+            sequence_count = self.dao._get_conn().execute(
+                "SELECT COUNT(*) FROM sqlite_sequence WHERE name IN (?, ?, ?)",
+                ("cough_events", "environment_readings", "telemetry_outbox"),
+            ).fetchone()[0]
+        self.assertEqual(0, sequence_count)
+
+    def test_full_reset_rolls_back_if_a_delete_fails(self) -> None:
+        with self.dao._lock:
+            self.dao._get_conn().execute(
+                """
+                CREATE TRIGGER stop_environment_reset
+                BEFORE DELETE ON environment_readings
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced reset failure');
+                END
+                """
+            )
+            self.dao._get_conn().commit()
+
+        before = self._counts()
+        with self.assertRaises(sqlite3.DatabaseError):
+            reset_dashboard_data(self.db_path, vacuum=False)
+        self.assertEqual(before, self._counts())
+
+    def test_database_path_is_shared_and_independent_of_working_directory(self) -> None:
+        configured = Path(self.tempdir.name) / "configured.db"
+        other_directory = Path(self.tempdir.name) / "other"
+        other_directory.mkdir()
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(other_directory)
+            with patch.dict(os.environ, {"GATEWAY_DB_PATH": str(configured)}):
+                self.assertEqual(configured.resolve(), resolve_database_path())
+            self.assertEqual(
+                (REPO_ROOT / "relative.db").resolve(),
+                resolve_database_path("relative.db"),
+            )
+        finally:
+            os.chdir(previous_cwd)
+
+        for source_name in (
+            "main.py",
+            "simulate_dashboard_data.py",
+            "reset_dashboard_data.py",
+        ):
+            source = (ROOT / "gateway" / "app" / source_name).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("resolve_database_path", source)
 
 
 class DashboardDeviceTableContractTest(unittest.TestCase):

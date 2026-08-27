@@ -88,6 +88,15 @@ independent worker attempts remote upload; failed uploads retry indefinitely
 and retain the original timestamp. See `gateway/README.md` for configuration,
 ACK/idempotency behavior, systemd templates, migration, and acceptance tests.
 
+Dashboard test data is maintained separately from real ingestion. Routine
+`simulate_dashboard_data --replace` replaces only current/legacy
+simulator-owned rows, while the explicit
+`python -m gateway.app.reset_dashboard_data --yes` command atomically clears
+all dashboard, patient, device, and telemetry rows from a deliberately chosen
+test database. All gateway commands share the same repo-root/
+`GATEWAY_DB_PATH` resolution; see the
+[simulator and reset workflow](gateway/README.md#optional-dashboard-simulator).
+
 The dashboard compares rolling 24-hour bouts with one Personal EWMA baseline,
 derives Calibrating/Normal/Warning/High Alert device warnings, and provides a
 separate automatic weekly [treatment-response comparison](gateway/README.md#treatment-response)

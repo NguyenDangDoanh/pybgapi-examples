@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import os
 import random
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 from .analytics import DISPLAY_TIMEZONE
+from .database_path import resolve_database_path
 from .dao import Dao
 
 SIM_PREFIX = "dashboard-sim-"
@@ -57,6 +57,7 @@ PROFILES = (
         (0.42, 0.36, 0.22),
     ),
 )
+SIMULATOR_CLIENT_IDS = tuple(profile.client_id for profile in PROFILES)
 
 _HOUR_WEIGHTS = (
     0.15, 0.12, 0.08, 0.07, 0.08, 0.14,
@@ -82,41 +83,82 @@ def _sim_exists(dao: Dao) -> bool:
 
 
 def cleanup_simulated_data(dao: Dao) -> None:
-    """Delete current simulator rows plus rows from the retired demo generator."""
+    """Delete only rows owned by current and retired dashboard simulators."""
     sim_pattern = f"{SIM_PREFIX}%"
     legacy_pattern = f"{LEGACY_DEMO_MESSAGE_PREFIX}%"
     client_slots = ", ".join("?" for _ in LEGACY_DEMO_CLIENT_IDS)
     device_slots = ", ".join("?" for _ in LEGACY_DEMO_DEVICE_IDS)
+    simulator_client_slots = ", ".join("?" for _ in SIMULATOR_CLIENT_IDS)
     owned_row_where = (
-        f"message_id LIKE ? OR message_id LIKE ? OR client_id IN ({client_slots}) "
+        f"message_id LIKE ? OR message_id LIKE ? OR session_id LIKE ? "
+        f"OR device_id LIKE ? OR client_id IN ({client_slots}) "
         f"OR device_id IN ({device_slots})"
     )
     owned_row_params = (
         sim_pattern,
         legacy_pattern,
+        sim_pattern,
+        sim_pattern,
         *LEGACY_DEMO_CLIENT_IDS,
         *LEGACY_DEMO_DEVICE_IDS,
     )
+    telemetry_payload_patterns = (
+        f"%{SIM_PREFIX}%",
+        f"%{LEGACY_DEMO_MESSAGE_PREFIX}%",
+        *(f"%{client_id}%" for client_id in LEGACY_DEMO_CLIENT_IDS),
+        *(f"%{device_id}%" for device_id in LEGACY_DEMO_DEVICE_IDS),
+    )
+    telemetry_payload_where = " OR ".join(
+        "payload_json LIKE ?" for _ in telemetry_payload_patterns
+    )
+    owned_outbox_where = (
+        f"event_id LIKE ? OR event_id LIKE ? OR {telemetry_payload_where}"
+    )
+    owned_outbox_params = (
+        sim_pattern,
+        legacy_pattern,
+        *telemetry_payload_patterns,
+    )
     with dao._lock:
         connection = dao._get_conn()
-        connection.execute(
-            f"DELETE FROM cough_events WHERE {owned_row_where}", owned_row_params
-        )
-        connection.execute(
-            f"DELETE FROM environment_readings WHERE {owned_row_where}",
-            owned_row_params,
-        )
-        connection.execute(
-            f"DELETE FROM client_settings WHERE client_id LIKE ? "
-            f"OR client_id IN ({client_slots})",
-            (sim_pattern, *LEGACY_DEMO_CLIENT_IDS),
-        )
-        connection.execute(
-            f"DELETE FROM devices WHERE device_id LIKE ? "
-            f"OR device_id IN ({device_slots}) OR client_id IN ({client_slots})",
-            (sim_pattern, *LEGACY_DEMO_DEVICE_IDS, *LEGACY_DEMO_CLIENT_IDS),
-        )
-        connection.commit()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM telemetry_receipts WHERE event_id LIKE ? "
+                "OR event_id LIKE ? OR event_id IN "
+                f"(SELECT event_id FROM telemetry_outbox WHERE {owned_outbox_where})",
+                (sim_pattern, legacy_pattern, *owned_outbox_params),
+            )
+            connection.execute(
+                f"DELETE FROM telemetry_outbox WHERE {owned_outbox_where}",
+                owned_outbox_params,
+            )
+            connection.execute(
+                f"DELETE FROM cough_events WHERE {owned_row_where}", owned_row_params
+            )
+            connection.execute(
+                f"DELETE FROM environment_readings WHERE {owned_row_where}",
+                owned_row_params,
+            )
+            connection.execute(
+                f"DELETE FROM client_settings WHERE client_id LIKE ? "
+                f"OR client_id IN ({client_slots}) "
+                f"OR client_id IN ({simulator_client_slots})",
+                (
+                    sim_pattern,
+                    *LEGACY_DEMO_CLIENT_IDS,
+                    *SIMULATOR_CLIENT_IDS,
+                ),
+            )
+            connection.execute(
+                f"DELETE FROM devices WHERE device_id LIKE ? "
+                f"OR device_id IN ({device_slots}) OR client_id IN ({client_slots})",
+                (sim_pattern, *LEGACY_DEMO_DEVICE_IDS, *LEGACY_DEMO_CLIENT_IDS),
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
 
 def _daily_targets(profile: Profile, local_today: date, rng: random.Random) -> list[tuple[date, int]]:
@@ -319,14 +361,16 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--db",
-        default=os.environ.get("GATEWAY_DB_PATH", "cough_monitor.db"),
-        help="SQLite database path",
+        default=None,
+        help="SQLite path (default: GATEWAY_DB_PATH or repo-root cough_monitor.db)",
     )
     parser.add_argument("--replace", action="store_true", help="Replace simulator-owned rows")
     parser.add_argument("--seed", type=int, default=20260823, help="Reproducible random seed")
     args = parser.parse_args()
 
-    dao = Dao(args.db)
+    db_path = resolve_database_path(args.db)
+    print(f"Using SQLite database: {db_path}", flush=True)
+    dao = Dao(str(db_path))
     dao.init_db(str(Path(__file__).with_name("schema.sql")))
     try:
         print(

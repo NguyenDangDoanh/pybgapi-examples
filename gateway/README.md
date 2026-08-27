@@ -361,12 +361,44 @@ events or refresh simulated device status afterward:
 python -m gateway.app.simulate_dashboard_data --replace
 ```
 
-`--replace` removes both current `dashboard-sim-*` rows and the exact patient,
-device, and message identifiers created by the retired `seed_demo_data.py`.
-Real patient/device rows are not deleted.
+`--replace` is safe for routine testing and is idempotent. Before generating
+the new static dataset it removes simulator-owned cough, environment, device,
+patient-setting, outbox, and receipt records. Ownership is recognized by the
+reserved `dashboard-sim-*` message/session/device prefix, the retired
+`demo-dashboard-*` prefix, and the exact legacy demo patient/device IDs from
+`seed_demo_data.py`. It does not delete unrelated real patient/device rows, so
+running the same seed repeatedly replaces rather than accumulates history.
 
 `--seed` makes the generated history reproducible. `--db
 /path/to/cough_monitor.db` selects another database.
+
+The gateway, simulator, and maintenance command all resolve the database path
+the same way: explicit `--db`, then `GATEWAY_DB_PATH`, then
+`<repo-root>/cough_monitor.db`. A relative configured path is anchored at the
+repository root, not the process working directory. Each command logs the
+absolute resolved path.
+
+### Explicit full dashboard reset
+
+For a test database that must be returned to a completely blank state, stop
+writers, back up the file, and run the deliberately destructive command:
+
+```bash
+cp cough_monitor.db "cough_monitor.db.backup-$(date +%Y%m%d-%H%M%S)"
+python -m gateway.app.reset_dashboard_data --yes
+python -m gateway.app.simulate_dashboard_data --replace
+```
+
+Use `--db /absolute/path/to/cough_monitor.db` on both commands when selecting a
+non-default database. Without `--yes`, reset exits without changing anything.
+The reset keeps the schema but atomically clears `telemetry_receipts`,
+`telemetry_outbox`, `cough_events`, `environment_readings`, `client_settings`,
+and `devices`, resets their applicable AUTOINCREMENT counters, and then
+vacuum-compacts the file. If any delete fails, the entire transaction rolls
+back. Use `--no-vacuum` only when page reclamation should be deferred.
+
+Unlike `--replace`, full reset intentionally deletes real and simulated data.
+It refuses to create or guess a missing database path.
 
 The scenarios cover stable, worsening, treatment-improving, EWMA warmup, and
 irregular/missing monitoring. Event times are stochastic and circadian, with
@@ -489,7 +521,9 @@ and persistence, wall-clock rolling windows despite delayed replay,
 occurrence-ordered paginated event queries and available-date navigation,
 30-minute type stacks, completed seven-day Day/Night/type grouping, automatic
 treatment weeks with EWMA reference snapshots, C24/EWMA warning levels,
-simulator isolation/reproducibility, EWMA warm-up/threshold/missing-day behavior,
+simulator isolation/reproducibility/idempotent replacement, explicit full
+dashboard reset and rollback, shared database-path resolution, real-row safety,
+EWMA warm-up/threshold/missing-day behavior,
 client isolation, two
 nodes using the same event counter, duplicate replay across reconnect, uint16
 wrap, environment persistence and validation, old-database migration,
