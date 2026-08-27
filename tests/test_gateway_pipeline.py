@@ -22,6 +22,7 @@ from gateway.app.dao import Dao
 from gateway.app.analytics import Analytics
 from gateway.app.event_processor import EventProcessor
 from gateway.app.fleet import Fleet
+from gateway.app.device_assignments import REAL_DEVICE_CLIENT_MAP
 from gateway.app.simulate_dashboard_data import (
     LEGACY_DEMO_CLIENT_IDS,
     LEGACY_DEMO_DEVICE_IDS,
@@ -147,6 +148,66 @@ class PipelineTest(unittest.TestCase):
                 "offline" if status == "disconnected" else "online",
                 row["status"],
             )
+
+    def test_known_real_device_assignments_are_created(self) -> None:
+        self.assertEqual(
+            "client_01",
+            self.dao.get_device("54:dc:e9:32:21:ac")["client_id"],
+        )
+        self.assertEqual(
+            "client_08",
+            self.dao.get_device("64:02:8f:64:12:88")["client_id"],
+        )
+        clients = {row["client_id"]: row for row in self.dao.list_clients()}
+        self.assertEqual(0, clients["client_08"]["total_events"])
+
+    def test_client08_status_event_is_online_and_assigned(self) -> None:
+        self.processor.process(
+            {
+                "event": "status",
+                "message_id": "client08-status",
+                "received_at": "2026-08-27T10:00:00.000Z",
+                "device": {
+                    "name": "MyDevice_01",
+                    "address": "64:02:8f:64:12:88",
+                    "address_type": 0,
+                },
+                "status": "connected",
+            }
+        )
+        device = self.dao.get_device("64:02:8f:64:12:88")
+        self.assertEqual("online", device["status"])
+        self.assertEqual("client_08", device["client_id"])
+
+    def test_client08_environment_and_cough_use_fixed_assignment(self) -> None:
+        device = "64:02:8f:64:12:88"
+        self.processor.process(
+            {
+                "event": "environment_data",
+                "message_id": "client08-environment",
+                "received_at": "2026-08-27T10:00:01.000Z",
+                "device": {"address": device},
+                "parsed": {
+                    "temperature_c": 27.25,
+                    "humidity_percent": 61.5,
+                },
+            }
+        )
+        self.processor.process(
+            self.cough_message(device, "client08-cough", 1)
+        )
+
+        environment = self.dao.get_recent_environment(1)[0]
+        cough = self.dao.get_events("client_08")[0]
+        api_device = self.dao.get_device(device)
+        joined_device = {
+            row["device_id"]: row for row in self.dao.get_devices()
+        }[device]
+        self.assertEqual("client_08", environment["client_id"])
+        self.assertEqual("client_08", cough["client_id"])
+        self.assertEqual("client_08", api_device["client_id"])
+        self.assertEqual(27.25, joined_device["temperature_c"])
+        self.assertEqual(61.5, joined_device["humidity_percent"])
 
     def test_stale_expiration_is_per_device_and_preserves_last_seen(self) -> None:
         stale_seen = "2026-08-23T00:00:00.000Z"
@@ -277,10 +338,13 @@ class PipelineTest(unittest.TestCase):
         )
         readings = self.dao.get_recent_environment(10)
         self.assertEqual(1, len(readings))
-        devices = self.dao.get_devices()
-        self.assertEqual(25.0, devices[0]["temperature_c"])
-        self.assertEqual(25.0, devices[0]["humidity_percent"])
-        self.assertEqual("online", devices[0]["status"])
+        device = self.dao.get_device("aa:bb:cc:dd:ee:01")
+        joined = {
+            row["device_id"]: row for row in self.dao.get_devices()
+        }["aa:bb:cc:dd:ee:01"]
+        self.assertEqual(25.0, joined["temperature_c"])
+        self.assertEqual(25.0, joined["humidity_percent"])
+        self.assertEqual("online", device["status"])
 
     def test_out_of_range_environment_is_rejected(self) -> None:
         self.processor.process(
@@ -356,6 +420,60 @@ class MigrationTest(unittest.TestCase):
                 self.assertEqual([], dao.get_recent_environment(10))
             finally:
                 dao.close()
+
+
+class KnownDeviceAssignmentPersistenceTest(unittest.TestCase):
+    def test_startup_repairs_and_persists_client08_with_historical_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            db_path = str(Path(tempdir) / "known-device.db")
+            dao = Dao(db_path)
+            dao.init_db(str(SCHEMA))
+            device = "64:02:8f:64:12:88"
+            dao.upsert_device(device, client_id="wrong-client")
+            dao.insert_event(
+                {
+                    "message_id": "old-client08-cough",
+                    "device_id": device,
+                    "client_id": "unknown",
+                    "cough_type": "dry",
+                    "event_ts": "2026-08-27T09:00:00.000Z",
+                    "received_ts": "2026-08-27T09:00:01.000Z",
+                }
+            )
+            dao.insert_environment(
+                {
+                    "message_id": "old-client08-environment",
+                    "device_id": device,
+                    "client_id": None,
+                    "event_ts": "2026-08-27T09:00:00.000Z",
+                    "received_ts": "2026-08-27T09:00:01.000Z",
+                    "temperature_c": 26.0,
+                    "humidity_percent": 60.0,
+                }
+            )
+
+            fleet = Fleet(dao)
+            self.assertEqual("client_08", fleet.assign(device, None))
+            self.assertEqual("client_08", dao.get_device(device)["client_id"])
+            self.assertEqual("client_08", dao.get_recent_events(1)[0]["client_id"])
+            self.assertEqual(
+                "client_08", dao.get_recent_environment(1)[0]["client_id"]
+            )
+            dao.close()
+
+            reopened = Dao(db_path)
+            reopened.init_db(str(SCHEMA))
+            Fleet(reopened)
+            try:
+                self.assertEqual(
+                    "client_08", reopened.get_device(device)["client_id"]
+                )
+                self.assertEqual(
+                    "client_01",
+                    reopened.get_device("54:dc:e9:32:21:ac")["client_id"],
+                )
+            finally:
+                reopened.close()
 
 
 class AnalyticsTest(unittest.TestCase):
@@ -948,6 +1066,55 @@ class SimulatedDataTest(unittest.TestCase):
                     )
             finally:
                 dao.close()
+
+    def test_device_list_has_two_real_and_six_simulated_assignments(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            dao = Dao(str(Path(tempdir) / "eight-devices.db"))
+            dao.init_db(str(SCHEMA))
+            try:
+                Fleet(dao)
+                simulate_history(
+                    dao,
+                    now=datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc),
+                    seed=17,
+                )
+                devices = dao.get_devices()
+                self.assertEqual(8, len(devices))
+                assignments = {
+                    row["device_id"]: row["client_id"] for row in devices
+                }
+                self.assertEqual(
+                    REAL_DEVICE_CLIENT_MAP,
+                    {
+                        device: assignments[device]
+                        for device in REAL_DEVICE_CLIENT_MAP
+                    },
+                )
+                self.assertEqual(
+                    {f"client_{index:02d}" for index in range(1, 9)},
+                    set(assignments.values()),
+                )
+            finally:
+                dao.close()
+
+
+class DashboardDeviceTableContractTest(unittest.TestCase):
+    def test_no_toggle_columns_and_warning_row_colors_remain(self) -> None:
+        source = (ROOT / "gateway" / "dashboard" / "layout.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("Toggle Columns", source)
+        self.assertNotIn("hidden_columns", source)
+        self.assertNotIn('"Warning level"', source)
+        self.assertIn("page_size=8", source)
+        for label, color in {
+            "Calibrating": "#f0f1f2",
+            "Normal": "#eef8f1",
+            "Warning": "#fff5dc",
+            "High Alert": "#fdeceb",
+        }.items():
+            self.assertIn(f'{{warning}} = "{label}"', source)
+            self.assertIn(color, source)
 
 
 class SocketConcurrencyTest(unittest.TestCase):

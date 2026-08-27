@@ -76,27 +76,25 @@ def _fleet_section() -> html.Div:
                     {"name": "Status", "id": "status"},
                     {"name": "Patient", "id": "patient"},
                     {"name": "Warning", "id": "warning"},
-                    {"name": "Warning level", "id": "warning_level"},
                     {"name": "Temperature", "id": "temperature"},
                     {"name": "Humidity", "id": "humidity"},
                     {"name": "Last seen", "id": "last_seen"},
                 ],
-                hidden_columns=["warning_level"],
                 style_data_conditional=[
                     {
-                        "if": {"filter_query": '{warning_level} = "calibrating"'},
+                        "if": {"filter_query": '{warning} = "Calibrating"'},
                         "backgroundColor": "#f0f1f2",
                     },
                     {
-                        "if": {"filter_query": '{warning_level} = "normal"'},
+                        "if": {"filter_query": '{warning} = "Normal"'},
                         "backgroundColor": "#eef8f1",
                     },
                     {
-                        "if": {"filter_query": '{warning_level} = "needs_review"'},
+                        "if": {"filter_query": '{warning} = "Warning"'},
                         "backgroundColor": "#fff5dc",
                     },
                     {
-                        "if": {"filter_query": '{warning_level} = "high_priority"'},
+                        "if": {"filter_query": '{warning} = "High Alert"'},
                         "backgroundColor": "#fdeceb",
                     },
                 ],

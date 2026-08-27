@@ -204,13 +204,9 @@ class EventProcessor:
         return metadata
 
     def _resolve_client(self, item: dict[str, Any]) -> str:
-        explicit = item.get("client_id")
-        if explicit:
-            return str(explicit)
-        current = self.dao.get_device(item["device_id"])
-        if current and current.get("client_id"):
-            return str(current["client_id"])
-        return "unknown"
+        return self.fleet.resolve_client(
+            item["device_id"], item.get("client_id")
+        )
 
     def _process_status(self, item: dict[str, Any]) -> None:
         connected = item.get("connected") is True or item.get("status") in (
@@ -226,7 +222,7 @@ class EventProcessor:
                 item["device_id"], item["received_ts"], **self._metadata(item)
             )
         if item.get("client_id"):
-            self.dao.set_client(item["device_id"], str(item["client_id"]))
+            self.fleet.assign(item["device_id"], str(item["client_id"]))
 
     def _process_cough(self, item: dict[str, Any]) -> None:
         self.fleet.touch(

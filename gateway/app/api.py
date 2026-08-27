@@ -156,9 +156,13 @@ def create_app(
             abort(400, description="client_id must be a string or null")
         if isinstance(client_id, str):
             client_id = client_id.strip() or None
-        fleet.assign(device_id, client_id)
+        assigned_client = fleet.assign(device_id, client_id)
         return jsonify(
-            {"status": "success", "device_id": device_id, "client_id": client_id}
+            {
+                "status": "success",
+                "device_id": device_id,
+                "client_id": assigned_client,
+            }
         )
 
     @app.get("/api/events/recent")

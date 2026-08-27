@@ -76,7 +76,6 @@ def register(app: dash.Dash) -> None:
                 "status": str(device.get("status") or "unknown").title(),
                 "patient": device.get("client_id") or "Unassigned",
                 "warning": device.get("warning_label") or "No recent data",
-                "warning_level": device.get("warning_level") or "unavailable",
                 "temperature": _fmt_number(device.get("temperature_c"), " °C"),
                 "humidity": _fmt_number(device.get("humidity_percent"), " %"),
                 "last_seen": _fmt_ts(device.get("last_seen")),

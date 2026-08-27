@@ -76,6 +76,27 @@ not overwrite `last_seen`. Initial connection, heartbeat, and valid cough or
 environment packets refresh `last_seen` from gateway receive time, never from a
 historical cough `event_ts`.
 
+### Known physical-device assignments
+
+Fixed real-device assignments are defined once in
+`gateway/app/device_assignments.py`:
+
+| BLE address | Patient |
+| --- | --- |
+| `54:dc:e9:32:21:ac` | `client_01` |
+| `64:02:8f:64:12:88` | `client_08` |
+
+`Fleet` reapplies these mappings whenever the gateway starts, stores them in
+the `devices` table, and repairs existing cough/environment rows belonging to
+the same physical device. Status, heartbeat, environment, cough, reconnect,
+dashboard restart, and Pi reboot therefore cannot turn either known device
+into Unassigned or assign it to another patient. The normal assignment API
+continues to work for devices not present in the fixed mapping.
+
+The Patient dropdown includes assigned device patients even before they have a
+cough event. A new `client_08` can therefore show the normal
+insufficient-history state instead of disappearing from the dashboard.
+
 ## Time synchronization contract
 
 ### GATT UUIDs
@@ -218,6 +239,11 @@ The doctor dashboard contains:
 - the existing EWMA Statistical finding plus automatic treatment-week
   response; and
 - an independent patient **Live feed** table with optional date filtering.
+
+The Device list exposes only its seven intended columns. Row colors are based
+on the visible Warning value, so the API's internal `warning_level` field does
+not require a hidden DataTable column and Dash does not render a **Toggle
+Columns** control. Pagination remains eight rows per page.
 
 ### Range anchoring
 

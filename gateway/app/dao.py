@@ -323,6 +323,46 @@ class Dao:
             )
             self._get_conn().commit()
 
+    def persist_device_assignment(
+        self,
+        device_id: str,
+        client_id: str | None,
+        assigned_at: str | None,
+        *,
+        backfill_existing: bool = False,
+    ) -> None:
+        """Persist one assignment and optionally repair existing sensor rows."""
+        normalized_device = str(device_id).strip().lower()
+        with self._lock:
+            conn = self._get_conn()
+            conn.execute(
+                "INSERT INTO devices (device_id, status) VALUES (?, 'offline') "
+                "ON CONFLICT(device_id) DO NOTHING",
+                (normalized_device,),
+            )
+            conn.execute(
+                """
+                UPDATE devices
+                SET client_id = ?, assigned_at = ?
+                WHERE device_id = ?
+                """,
+                (client_id, assigned_at, normalized_device),
+            )
+            if backfill_existing:
+                conn.execute(
+                    "UPDATE cough_events SET client_id = ? WHERE device_id = ?",
+                    (client_id, normalized_device),
+                )
+                conn.execute(
+                    """
+                    UPDATE environment_readings
+                    SET client_id = ?
+                    WHERE device_id = ?
+                    """,
+                    (client_id, normalized_device),
+                )
+            conn.commit()
+
     def set_status(self, device_id: str, status: str, last_seen: str) -> None:
         with self._lock:
             self._get_conn().execute(
@@ -372,11 +412,20 @@ class Dao:
 
     def list_clients(self) -> list[dict[str, Any]]:
         sql = """
-            SELECT client_id, COUNT(*) AS total_events, MAX(received_ts) AS last_event
-            FROM cough_events
-            WHERE client_id IS NOT NULL AND client_id != 'unknown'
-            GROUP BY client_id
-            ORDER BY client_id
+            SELECT clients.client_id,
+                   COUNT(events.id) AS total_events,
+                   MAX(events.received_ts) AS last_event
+            FROM (
+                SELECT client_id FROM devices
+                WHERE client_id IS NOT NULL AND client_id != 'unknown'
+                UNION
+                SELECT client_id FROM cough_events
+                WHERE client_id IS NOT NULL AND client_id != 'unknown'
+            ) AS clients
+            LEFT JOIN cough_events AS events
+                ON events.client_id = clients.client_id
+            GROUP BY clients.client_id
+            ORDER BY clients.client_id
         """
         with self._lock:
             return self._rows(self._get_conn().execute(sql))
