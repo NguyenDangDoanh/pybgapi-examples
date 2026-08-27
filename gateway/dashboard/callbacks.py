@@ -32,7 +32,7 @@ _GRID = "#e1e0d9"
 _AXIS = "#c3c2b7"
 _TYPE_COLORS = {"dry": "#5f82ad", "wet": "#679b82", "unknown": "#9a948c"}
 _PERIOD_COLORS = {"day": "#6e91bd", "night": "#6f7798"}
-_BASELINE_COLOR = "#7d8896"
+_BASELINE_COLOR = "#c2410c"
 _FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 
 
@@ -367,7 +367,7 @@ def _seven_day_figure(stats: dict, client_id: str) -> go.Figure:
             y=[value, value],
             mode="lines",
             showlegend=False,
-            line={"color": _BASELINE_COLOR, "width": 1.5, "dash": "dash"},
+            line={"color": _BASELINE_COLOR, "width": 2.25, "dash": "dash"},
             hoverinfo="skip",
         )
         fig.add_annotation(
