@@ -15,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import dash
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -37,8 +39,63 @@ from gateway.app.reset_dashboard_data import (
     main as reset_dashboard_main,
     reset_dashboard_data,
 )
+from gateway.dashboard.callbacks import (
+    _event_date_dropdown_state,
+    _seven_calendar_day_points,
+    _seven_day_figure,
+)
 
 SCHEMA = ROOT / "gateway" / "app" / "schema.sql"
+
+
+class DashboardInteractionTest(unittest.TestCase):
+    @staticmethod
+    def _day(value: str, total: int = 3) -> dict:
+        return {
+            "date": value,
+            "day": total,
+            "night": 0,
+            "total": total,
+            "day_types": {"dry": total, "wet": 0, "unknown": 0},
+            "night_types": {"dry": 0, "wet": 0, "unknown": 0},
+        }
+
+    def test_seven_day_chart_keeps_missing_calendar_day_visible(self) -> None:
+        stats = {
+            "window_7d_start": "2026-08-21",
+            "window_7d_end": "2026-08-27",
+            "per_day": [
+                self._day(f"2026-08-{day:02d}") for day in range(21, 27)
+            ],
+            "baseline": {},
+        }
+
+        points = _seven_calendar_day_points(stats)
+        figure = _seven_day_figure(stats, "client_03")
+
+        self.assertEqual(7, len(points))
+        self.assertEqual("2026-08-27", points[-1]["date"])
+        self.assertFalse(points[-1]["available"])
+        self.assertEqual(7, len(figure.layout.xaxis.tickvals))
+        self.assertIn("6/7 observed", figure.layout.title.text)
+        self.assertEqual(("No data",), figure.data[-1].text)
+
+    def test_polling_date_refresh_does_not_reset_live_feed_page(self) -> None:
+        payload = {"dates": ["2026-08-26", "2026-08-27"]}
+
+        _options, unchanged = _event_date_dropdown_state(
+            payload, "2026-08-27", client_changed=False
+        )
+        _options, all_dates_unchanged = _event_date_dropdown_state(
+            payload, None, client_changed=False
+        )
+        _options, reset_for_client = _event_date_dropdown_state(
+            payload, "2026-08-27", client_changed=True
+        )
+
+        self.assertIs(dash.no_update, unchanged)
+        self.assertIs(dash.no_update, all_dates_unchanged)
+        self.assertIsNone(reset_for_client)
 
 
 class PipelineTest(unittest.TestCase):

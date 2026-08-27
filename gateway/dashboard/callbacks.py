@@ -98,15 +98,12 @@ def register(app: dash.Dash) -> None:
             f"/clients/{quote(str(client_id), safe='')}/event-dates"
         )
         if payload is None:
-            return dash.no_update, None
-        options = [
-            {"label": value, "value": value}
-            for value in reversed(payload.get("dates", []))
-        ]
-        available = set(payload.get("dates", []))
-        if dash.ctx.triggered_id == L.CLIENT_DROPDOWN_ID:
-            selected_date = None
-        return options, selected_date if selected_date in available else None
+            return dash.no_update, dash.no_update
+        return _event_date_dropdown_state(
+            payload,
+            selected_date,
+            client_changed=dash.ctx.triggered_id == L.CLIENT_DROPDOWN_ID,
+        )
 
     @app.callback(
         Output(L.LIVE_FEED_TABLE_ID, "page_current"),
@@ -295,12 +292,8 @@ def _rolling_24h_figure(stats: dict, client_id: str) -> go.Figure:
 
 
 def _seven_day_figure(stats: dict, client_id: str) -> go.Figure:
-    points = stats.get("per_day", [])
-    if not stats.get("completed_7d_available") or len(points) != 7:
-        observed = int(stats.get("observed_7d_days") or len(points))
-        return _placeholder_figure(
-            f"7 completed observed days required ({observed}/7 available)"
-        )
+    points = _seven_calendar_day_points(stats)
+    observed = sum(bool(point["available"]) for point in points)
     x_values = [datetime.fromisoformat(str(point["date"])) for point in points]
     totals = [int(point.get("total", 0)) for point in points]
     fig = go.Figure()
@@ -318,7 +311,10 @@ def _seven_day_figure(stats: dict, client_id: str) -> go.Figure:
             )
         fig.add_bar(
             x=x_values,
-            y=[int(point.get(period, 0)) for point in points],
+            y=[
+                int(point.get(period, 0)) if point["available"] else None
+                for point in points
+            ],
             width=0.68 * 24 * 60 * 60 * 1000,
             name=period.title(),
             marker_color=_PERIOD_COLORS[period],
@@ -336,13 +332,31 @@ def _seven_day_figure(stats: dict, client_id: str) -> go.Figure:
         x=x_values,
         y=totals,
         mode="text",
-        text=[str(value) if value else "" for value in totals],
+        text=[
+            str(value) if point["available"] and value else ""
+            for point, value in zip(points, totals)
+        ],
         textposition="top center",
         textfont={"size": 10, "color": _INK_2},
         cliponaxis=False,
         showlegend=False,
         hoverinfo="skip",
     )
+    missing_dates = [
+        x for x, point in zip(x_values, points) if not point["available"]
+    ]
+    if missing_dates:
+        fig.add_scatter(
+            x=missing_dates,
+            y=[0] * len(missing_dates),
+            mode="markers+text",
+            marker={"symbol": "x", "size": 8, "color": _MUTED},
+            text=["No data"] * len(missing_dates),
+            textposition="top center",
+            textfont={"size": 10, "color": _MUTED},
+            showlegend=False,
+            hovertemplate="%{x|%b %d}<br>No monitoring data<extra></extra>",
+        )
 
     baseline = stats.get("baseline", {})
     if baseline.get("available") and baseline.get("baseline") is not None:
@@ -366,7 +380,10 @@ def _seven_day_figure(stats: dict, client_id: str) -> go.Figure:
             font={"size": 11, "color": _BASELINE_COLOR},
         )
 
-    _apply_chrome(fig, f"Cough bouts — 7 completed days ({sum(totals)})")
+    _apply_chrome(
+        fig,
+        f"Cough bouts — 7 completed days ({sum(totals)}; {observed}/7 observed)",
+    )
     fig.update_layout(
         barmode="stack",
         bargap=0.28,
@@ -375,7 +392,13 @@ def _seven_day_figure(stats: dict, client_id: str) -> go.Figure:
         showlegend=True,
         legend={"orientation": "h", "y": -0.19, "x": 0},
         uirevision=f"{client_id}:7d:{stats.get('window_7d_end', '')}",
-        xaxis={"type": "date", "tickformat": "%b %d", "fixedrange": True},
+        xaxis={
+            "type": "date",
+            "tickmode": "array",
+            "tickvals": x_values,
+            "ticktext": [value.strftime("%b %d") for value in x_values],
+            "fixedrange": True,
+        },
     )
     fig.update_yaxes(
         fixedrange=True,
@@ -383,6 +406,58 @@ def _seven_day_figure(stats: dict, client_id: str) -> go.Figure:
         dtick=_coarse_tick_step(max(totals, default=0)),
     )
     return fig
+
+
+def _event_date_dropdown_state(
+    payload: dict, selected_date: str | None, *, client_changed: bool
+):
+    """Refresh date choices without resetting live-feed pagination on polling."""
+    dates = payload.get("dates", [])
+    options = [{"label": value, "value": value} for value in reversed(dates)]
+    available = set(dates)
+    if client_changed or (selected_date is not None and selected_date not in available):
+        return options, None
+    return options, dash.no_update
+
+
+def _seven_calendar_day_points(stats: dict) -> list[dict]:
+    """Return all seven calendar slots while preserving missing days as unavailable."""
+    observed_by_date = {
+        str(point["date"]): {**point, "available": True}
+        for point in stats.get("per_day", [])
+    }
+    try:
+        start = date.fromisoformat(str(stats["window_7d_start"]))
+        end = date.fromisoformat(str(stats["window_7d_end"]))
+    except (KeyError, TypeError, ValueError):
+        known_dates = sorted(date.fromisoformat(value) for value in observed_by_date)
+        end = (
+            known_dates[-1]
+            if known_dates
+            else datetime.now(DISPLAY_TIMEZONE).date() - timedelta(days=1)
+        )
+        start = end - timedelta(days=6)
+    if (end - start).days != 6:
+        start = end - timedelta(days=6)
+
+    points = []
+    for offset in range(7):
+        day_text = (start + timedelta(days=offset)).isoformat()
+        points.append(
+            observed_by_date.get(
+                day_text,
+                {
+                    "date": day_text,
+                    "available": False,
+                    "day": 0,
+                    "night": 0,
+                    "total": 0,
+                    "day_types": {"dry": 0, "wet": 0, "unknown": 0},
+                    "night_types": {"dry": 0, "wet": 0, "unknown": 0},
+                },
+            )
+        )
+    return points
 
 
 def _baseline_content(status: dict):
