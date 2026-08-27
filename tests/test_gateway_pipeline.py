@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import random
 import sqlite3
 import socket
 import struct
@@ -29,8 +28,6 @@ from gateway.app.simulate_dashboard_data import (
     PROFILES,
     SIM_PREFIX,
     cleanup_simulated_data,
-    insert_live_event,
-    refresh_simulated_device_status,
     simulate_history,
 )
 
@@ -762,7 +759,7 @@ class SimulatedDataTest(unittest.TestCase):
             timespec="milliseconds"
         ).replace("+00:00", "Z")
 
-    def test_simulator_is_reproducible_isolated_and_supports_live_insert(self) -> None:
+    def test_simulator_is_static_reproducible_and_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             dao = Dao(str(Path(tempdir) / "sim.db"))
             dao.init_db(str(SCHEMA))
@@ -772,19 +769,32 @@ class SimulatedDataTest(unittest.TestCase):
                 analytics = Analytics(dao)
                 self.assertTrue(first["created"])
                 self.assertEqual(6, len(first["patients"]))
-                self.assertTrue(
-                    all(client.startswith(SIM_PREFIX) for client in first["patients"])
+                self.assertEqual(
+                    {
+                        "irregular-missing": "client_02",
+                        "needs-review": "client_03",
+                        "stable": "client_04",
+                        "treatment-improving": "client_05",
+                        "warmup": "client_06",
+                        "worsening": "client_07",
+                    },
+                    {profile.key: profile.client_id for profile in PROFILES},
                 )
+                by_key = {profile.key: profile for profile in PROFILES}
                 worsening = analytics.get_client_stats(
-                    f"{SIM_PREFIX}worsening", now=now
+                    by_key["worsening"].client_id, now=now
                 )
-                warmup = analytics.get_client_stats(f"{SIM_PREFIX}warmup", now=now)
-                stable = analytics.get_client_stats(f"{SIM_PREFIX}stable", now=now)
+                warmup = analytics.get_client_stats(
+                    by_key["warmup"].client_id, now=now
+                )
+                stable = analytics.get_client_stats(
+                    by_key["stable"].client_id, now=now
+                )
                 review = analytics.get_client_stats(
-                    f"{SIM_PREFIX}needs-review", now=now
+                    by_key["needs-review"].client_id, now=now
                 )
                 treatment = analytics.get_client_stats(
-                    f"{SIM_PREFIX}treatment-improving", now=now
+                    by_key["treatment-improving"].client_id, now=now
                 )
                 self.assertEqual("normal", stable["baseline"]["warning_level"])
                 self.assertEqual(
@@ -875,15 +885,6 @@ class SimulatedDataTest(unittest.TestCase):
                 self.assertNotIn(legacy_device, device_ids)
                 self.assertIn("real-device", device_ids)
 
-                profile = PROFILES[0]
-                before = len(dao.get_events(profile.client_id))
-                self.assertTrue(
-                    insert_live_event(
-                        dao, profile, random.Random(99), 1, now=now
-                    )
-                )
-                self.assertEqual(before + 1, len(dao.get_events(profile.client_id)))
-
                 event_count = len(dao.get_recent_events(500))
                 environment_count = len(dao.get_recent_environment(500))
                 dao.mark_stale_devices_offline(
@@ -896,24 +897,13 @@ class SimulatedDataTest(unittest.TestCase):
                         if row["device_id"].startswith(SIM_PREFIX)
                     )
                 )
-                heartbeat_at = now + timedelta(seconds=10)
-                self.assertEqual(
-                    len(PROFILES),
-                    refresh_simulated_device_status(dao, now=heartbeat_at),
-                )
                 simulated_devices = [
                     row
                     for row in dao.get_devices()
                     if row["device_id"].startswith(SIM_PREFIX)
                 ]
                 self.assertTrue(
-                    all(row["status"] == "online" for row in simulated_devices)
-                )
-                self.assertTrue(
-                    all(
-                        row["last_seen"] == self._iso(heartbeat_at)
-                        for row in simulated_devices
-                    )
+                    all(row["status"] == "offline" for row in simulated_devices)
                 )
                 self.assertEqual(event_count, len(dao.get_recent_events(500)))
                 self.assertEqual(
@@ -930,7 +920,7 @@ class SimulatedDataTest(unittest.TestCase):
             finally:
                 dao.close()
 
-    def test_live_caps_preserve_each_simulated_warning_scenario(self) -> None:
+    def test_static_dataset_preserves_each_warning_scenario(self) -> None:
         expected_levels = {
             "stable": "normal",
             "needs-review": "needs_review",
@@ -946,32 +936,7 @@ class SimulatedDataTest(unittest.TestCase):
                 now = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
                 simulate_history(dao, now=now, seed=17)
                 analytics = Analytics(dao)
-                serial = 1000
                 for profile in PROFILES:
-                    for _ in range(100):
-                        serial += 1
-                        insert_live_event(
-                            dao,
-                            profile,
-                            random.Random(serial),
-                            serial,
-                            now=now,
-                        )
-                    current_c24 = dao.count_events_by_occurrence(
-                        profile.client_id,
-                        start_time=self._iso(now - timedelta(hours=24)),
-                        end_time=self._iso(now),
-                    )
-                    self.assertLessEqual(current_c24, profile.live_c24_cap)
-                    self.assertFalse(
-                        insert_live_event(
-                            dao,
-                            profile,
-                            random.Random(serial + 1),
-                            serial + 1,
-                            now=now,
-                        )
-                    )
                     status = analytics.ewma_baseline_status(
                         profile.client_id,
                         now=now,
@@ -1074,6 +1039,7 @@ class BleRoutingTest(unittest.TestCase):
         central.sequence = 0
         central._closed = False
         central._advertisement_debug_after = {}
+        central._next_ncp_health_check_at = float("inf")
         central.backend = SimpleNamespace(enabled=False, close=lambda: None)
         return central
 
@@ -1361,6 +1327,21 @@ class BleRoutingTest(unittest.TestCase):
 
         self.assertFalse(central._ncp_transport_alive())
 
+    def test_active_hello_failure_is_transport_loss(self) -> None:
+        from ble_central import NcpTransportLost
+
+        central = self._minimal_run_central(booted=True)
+        central._next_ncp_health_check_at = 0.0
+        central.lib = SimpleNamespace(
+            bt=SimpleNamespace(
+                system=SimpleNamespace(
+                    hello=lambda: (_ for _ in ()).throw(OSError("no response"))
+                )
+            )
+        )
+        with self.assertRaisesRegex(NcpTransportLost, "system.hello health check"):
+            central._check_ncp_health(10.0)
+
     def test_transport_loss_reports_every_running_node_offline_and_cleans_up(self) -> None:
         from ble_central import BleCentral, NcpTransportLost
         from models import ConnectionState
@@ -1456,6 +1437,7 @@ class BleRoutingTest(unittest.TestCase):
             SimpleNamespace(),
             central_factory=RecoveringCentral,
             sleep=sleeps.append,
+            port_resolver=lambda _args: "/dev/ttyACM-test",
         )
 
         self.assertEqual([1, 2, 3], created)
@@ -1479,6 +1461,7 @@ class BleRoutingTest(unittest.TestCase):
             SimpleNamespace(),
             central_factory=InterruptedCentral,
             sleep=sleeps.append,
+            port_resolver=lambda _args: "/dev/ttyACM-test",
         )
 
         self.assertEqual([True], created)

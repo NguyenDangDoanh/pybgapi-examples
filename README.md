@@ -80,6 +80,14 @@ by event time. See [current data flow and timestamp
 responsibilities](gateway/README.md#current-data-flow-and-timestamp-responsibilities)
 for the complete ingest, storage, API, analytics, and dashboard behavior.
 
+The Pi gateway also supports resilient BGM220 auto-discovery and durable
+store-and-forward. Serial candidates are verified by BGAPI handshake, so a
+hot-plug change from `ttyACM0` to `ttyACM1` is recovered without restarting
+Python. Cough/environment messages are committed to a SQLite outbox before an
+independent worker attempts remote upload; failed uploads retry indefinitely
+and retain the original timestamp. See `gateway/README.md` for configuration,
+ACK/idempotency behavior, systemd templates, migration, and acceptance tests.
+
 The dashboard compares rolling 24-hour bouts with one Personal EWMA baseline,
 derives Calibrating/Normal/Warning/High Alert device warnings, and provides a
 separate automatic weekly [treatment-response comparison](gateway/README.md#treatment-response)

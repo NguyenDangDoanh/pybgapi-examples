@@ -1,0 +1,18 @@
+[Unit]
+Description=BreathSense BGM220 auto-discovery BLE host
+After=breathsense-dashboard.service
+Wants=breathsense-dashboard.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/pybgapi-examples
+Environment=GATEWAY_SOCKET_PATH=/tmp/cough_gw.sock
+EnvironmentFile=-%h/.config/breathsense/gateway.env
+ExecStart=%h/pybgapi-examples/.venv/bin/python gateway/ble_host_modular/main.py --xapi api/sl_bt.xapi --name-prefix MyDevice --max-connections 2 --backend-socket ${GATEWAY_SOCKET_PATH} -l INFO
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

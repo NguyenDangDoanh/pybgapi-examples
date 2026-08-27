@@ -30,9 +30,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "serial_port",
+        nargs="?",
+        default="auto",
         help=(
-            "BGM220 serial port, preferably the stable "
-            "/dev/serial/by-id/... path."
+            "BGM220 serial port or 'auto' (default). Auto mode ranks current "
+            "ports by USB metadata and verifies the NCP with BGAPI hello."
+        ),
+    )
+    parser.add_argument(
+        "--bgm220-serial-number",
+        help=(
+            "Optional exact USB serial number used to narrow auto-discovery "
+            "when several Silicon Labs/J-Link boards are attached."
         ),
     )
     parser.add_argument(

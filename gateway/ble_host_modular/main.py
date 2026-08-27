@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import logging
 import time
+from argparse import Namespace
 
+from bgm220_discovery import discover_bgm220_port
 from ble_central import BleCentral, NcpTransportLost
 from config import parse_args
 from constants import NCP_RETRY_SECONDS
@@ -18,22 +20,41 @@ def supervise(
     args,
     central_factory=BleCentral,
     sleep=time.sleep,
+    port_resolver=discover_bgm220_port,
 ) -> None:
     """Run one BLE host at a time and recreate it after NCP transport loss."""
     attempt = 0
     while True:
+        try:
+            serial_port = port_resolver(args)
+        except KeyboardInterrupt:
+            LOG.info("Stopped by user.")
+            break
+        except Exception as exc:
+            LOG.exception("[BGM220] serial discovery failed: %s", exc)
+            serial_port = None
+        if serial_port is None:
+            try:
+                sleep(NCP_RETRY_SECONDS)
+            except KeyboardInterrupt:
+                LOG.info("Stopped by user.")
+                break
+            continue
+
         attempt += 1
+        session_args = Namespace(**vars(args))
+        session_args.serial_port = serial_port
         LOG.info(
             "Starting BGM220 host session attempt=%d serial=%s",
             attempt,
-            getattr(args, "serial_port", "<unspecified>"),
+            serial_port,
         )
         try:
-            central_factory(args).run()
+            central_factory(session_args).run()
             break
         except NcpTransportLost as exc:
             LOG.warning(
-                "%s; retrying BGM220 in %.1f seconds",
+                "[BGM220] disconnected: %s; reconnecting in %.1f seconds",
                 exc,
                 NCP_RETRY_SECONDS,
             )

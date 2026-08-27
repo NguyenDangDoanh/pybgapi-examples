@@ -1,12 +1,10 @@
-"""Generate isolated historical and live data for BreathSense dashboard testing."""
+"""Generate one static, isolated BreathSense dashboard test dataset."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import random
-import signal
-import time as clock
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -15,7 +13,6 @@ from .analytics import DISPLAY_TIMEZONE
 from .dao import Dao
 
 SIM_PREFIX = "dashboard-sim-"
-SIMULATOR_STATUS_HEARTBEAT_SECONDS = 10.0
 LEGACY_DEMO_MESSAGE_PREFIX = "demo-dashboard-"
 LEGACY_DEMO_CLIENT_IDS = (
     "demo_patient_above_baseline",
@@ -34,13 +31,8 @@ LEGACY_DEMO_DEVICE_IDS = (
 class Profile:
     key: str
     label: str
+    client_id: str
     type_weights: tuple[float, float, float]
-    live_rate_per_hour: float
-    live_c24_cap: int
-
-    @property
-    def client_id(self) -> str:
-        return f"{SIM_PREFIX}{self.key}"
 
     @property
     def device_id(self) -> str:
@@ -48,23 +40,21 @@ class Profile:
 
 
 PROFILES = (
-    Profile("stable", "Stable", (0.48, 0.40, 0.12), 2.0, 15),
-    Profile("needs-review", "Warning", (0.50, 0.37, 0.13), 4.0, 30),
-    Profile("worsening", "Worsening", (0.55, 0.33, 0.12), 7.0, 30),
+    Profile("stable", "Stable", "client_04", (0.48, 0.40, 0.12)),
+    Profile("needs-review", "Warning", "client_03", (0.50, 0.37, 0.13)),
+    Profile("worsening", "Worsening", "client_07", (0.55, 0.33, 0.12)),
     Profile(
         "treatment-improving",
         "Treatment improving",
+        "client_05",
         (0.35, 0.55, 0.10),
-        1.8,
-        9,
     ),
-    Profile("warmup", "Warmup", (0.45, 0.38, 0.17), 2.5, 12),
+    Profile("warmup", "Warmup", "client_06", (0.45, 0.38, 0.17)),
     Profile(
         "irregular-missing",
         "Irregular / missing",
+        "client_02",
         (0.42, 0.36, 0.22),
-        1.0,
-        8,
     ),
 )
 
@@ -206,15 +196,6 @@ def _event_times(day: date, count: int, local_now: datetime, rng: random.Random)
     return sorted(values[:count])
 
 
-def _event_counter(dao: Dao, device_id: str) -> int:
-    with dao._lock:
-        row = dao._get_conn().execute(
-            "SELECT MAX(event_counter) FROM cough_events WHERE device_id = ?",
-            (device_id,),
-        ).fetchone()
-    return int(row[0] or 0)
-
-
 def _insert_event(
     dao: Dao,
     profile: Profile,
@@ -334,90 +315,6 @@ def simulate_history(
     }
 
 
-def insert_live_event(
-    dao: Dao,
-    profile: Profile,
-    rng: random.Random,
-    serial: int,
-    now: datetime | None = None,
-) -> bool:
-    """Insert one current event through the same SQLite data contract."""
-    now_utc = now or datetime.now(timezone.utc)
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
-    _upsert_profile_device(dao, profile, now_utc)
-    window_start = now_utc - timedelta(hours=24)
-    current_c24 = dao.count_events_by_occurrence(
-        profile.client_id,
-        start_time=_utc_iso(window_start),
-        end_time=_utc_iso(now_utc),
-    )
-    if current_c24 >= profile.live_c24_cap:
-        return False
-    counter = (_event_counter(dao, profile.device_id) + 1) & 0xFFFF
-    return _insert_event(
-        dao,
-        profile,
-        now_utc.astimezone(DISPLAY_TIMEZONE),
-        counter,
-        f"live-{serial:010d}",
-        rng,
-        received=now_utc,
-    )
-
-
-def refresh_simulated_device_status(
-    dao: Dao,
-    now: datetime | None = None,
-) -> int:
-    """Refresh simulated BLE connectivity without creating sensor events."""
-    now_utc = now or datetime.now(timezone.utc)
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=timezone.utc)
-    for profile in PROFILES:
-        _upsert_profile_device(dao, profile, now_utc)
-    return len(PROFILES)
-
-
-def run_live(dao: Dao, *, seed: int, time_scale: float = 1.0) -> None:
-    """Keep inserting stochastic live events until interrupted."""
-    if time_scale <= 0:
-        raise ValueError("time_scale must be positive")
-    rng = random.Random(seed + 1)
-    serial = 0
-    next_due = {
-        profile.key: clock.monotonic()
-        + rng.expovariate(profile.live_rate_per_hour / 3600.0) / time_scale
-        for profile in PROFILES
-    }
-    next_heartbeat_at = clock.monotonic() + SIMULATOR_STATUS_HEARTBEAT_SECONDS
-    mode = "real time" if time_scale == 1.0 else f"accelerated test mode ({time_scale:g}x)"
-    print(f"Live simulator running in {mode}; press Ctrl+C to stop.", flush=True)
-    while True:
-        now_monotonic = clock.monotonic()
-        if now_monotonic >= next_heartbeat_at:
-            refresh_simulated_device_status(dao)
-            next_heartbeat_at = (
-                now_monotonic + SIMULATOR_STATUS_HEARTBEAT_SECONDS
-            )
-            continue
-        profile = min(PROFILES, key=lambda item: next_due[item.key])
-        delay = max(
-            min(next_due[profile.key], next_heartbeat_at) - now_monotonic,
-            0.0,
-        )
-        if delay:
-            clock.sleep(min(delay, 1.0))
-            continue
-        serial += 1
-        created = insert_live_event(dao, profile, rng, serial)
-        if created:
-            print(f"live event: {profile.client_id}", flush=True)
-        next_due[profile.key] = clock.monotonic() + (
-            rng.expovariate(profile.live_rate_per_hour / 3600.0) / time_scale
-        )
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -427,43 +324,18 @@ def main() -> None:
     )
     parser.add_argument("--replace", action="store_true", help="Replace simulator-owned rows")
     parser.add_argument("--seed", type=int, default=20260823, help="Reproducible random seed")
-    mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--history-only", action="store_true", help="Backfill and exit")
-    mode.add_argument("--live-only", action="store_true", help="Skip historical backfill")
-    parser.add_argument(
-        "--time-scale",
-        type=float,
-        default=1.0,
-        help="Accelerate live delays without creating future timestamps",
-    )
     args = parser.parse_args()
-    if args.time_scale <= 0:
-        parser.error("--time-scale must be positive")
 
     dao = Dao(args.db)
     dao.init_db(str(Path(__file__).with_name("schema.sql")))
     try:
-        if not args.live_only:
-            print(
-                simulate_history(dao, seed=args.seed, replace=args.replace),
-                flush=True,
-            )
-        elif args.replace:
-            cleanup_simulated_data(dao)
-        if args.history_only:
-            return
-        refresh_simulated_device_status(dao)
-        run_live(dao, seed=args.seed, time_scale=args.time_scale)
-    except KeyboardInterrupt:
-        print("Simulator stopped.")
+        print(
+            simulate_history(dao, seed=args.seed, replace=args.replace),
+            flush=True,
+        )
     finally:
         dao.close()
 
 
-def raise_keyboard_interrupt() -> None:
-    raise KeyboardInterrupt
-
-
 if __name__ == "__main__":
-    signal.signal(signal.SIGTERM, lambda _signum, _frame: raise_keyboard_interrupt())
     main()

@@ -11,6 +11,7 @@ from typing import Any
 
 from .dao import Dao
 from .fleet import Fleet
+from .telemetry_queue import TelemetryQueue
 
 LOG = logging.getLogger(__name__)
 _COUGH_TYPES = {0: "unknown", 1: "dry", 2: "wet"}
@@ -63,30 +64,55 @@ def _safe_bool(value: Any) -> bool | None:
 class EventProcessor:
     """Accept current nested schema plus the older flat test-message shape."""
 
-    def __init__(self, dao: Dao, fleet: Fleet) -> None:
+    def __init__(
+        self,
+        dao: Dao,
+        fleet: Fleet,
+        telemetry_queue: TelemetryQueue | None = None,
+    ) -> None:
         self.dao = dao
         self.fleet = fleet
+        self.telemetry_queue = telemetry_queue
         self.last_counter: dict[tuple[str, str], int] = {}
         self._lock = threading.RLock()
 
-    def process(self, raw: dict[str, Any]) -> None:
+    def process(self, raw: dict[str, Any], *, durable: bool = True) -> bool:
         if not isinstance(raw, dict):
             LOG.warning("Skipped non-object socket payload")
-            return
+            return False
         normalized = self._normalize(raw)
         if normalized is None:
-            return
+            return False
 
         with self._lock:
             event_name = normalized["event"]
+            if event_name == "environment_data" and not self._valid_environment(
+                normalized
+            ):
+                return False
+            if (
+                durable
+                and self.telemetry_queue is not None
+                and event_name in ("cough_event", "environment_data")
+            ):
+                event_id, inserted = self.telemetry_queue.enqueue(
+                    raw,
+                    event_id=normalized["message_id"],
+                    event_ts=normalized["event_ts"],
+                )
+                if inserted:
+                    LOG.info("[DB] saved event_id=%s", event_id)
             if event_name == "status":
                 self._process_status(normalized)
+                return True
             elif event_name == "cough_event":
                 self._process_cough(normalized)
+                return True
             elif event_name == "environment_data":
-                self._process_environment(normalized)
+                return self._process_environment(normalized)
             else:
                 LOG.warning("Unsupported event type %r", event_name)
+                return False
 
     def _normalize(self, raw: dict[str, Any]) -> dict[str, Any] | None:
         device = raw.get("device") if isinstance(raw.get("device"), dict) else {}
@@ -263,24 +289,14 @@ class EventProcessor:
         if row_id is None:
             LOG.info("Duplicate message_id ignored: %s", item["message_id"])
 
-    def _process_environment(self, item: dict[str, Any]) -> None:
-        if item.get("temperature_c") is None or item.get("humidity_percent") is None:
-            LOG.warning("Skipped incomplete environment payload from %s", item["device_id"])
-            return
-        try:
-            temperature_c = float(item["temperature_c"])
-            humidity_percent = float(item["humidity_percent"])
-        except (TypeError, ValueError):
-            LOG.warning("Skipped non-numeric environment payload from %s", item["device_id"])
-            return
-        if not -50.0 <= temperature_c <= 100.0 or not 0.0 <= humidity_percent <= 100.0:
-            LOG.warning(
-                "Skipped out-of-range environment payload from %s: temperature=%s humidity=%s",
-                item["device_id"],
-                temperature_c,
-                humidity_percent,
-            )
-            return
+    def _process_environment(self, item: dict[str, Any]) -> bool:
+        # Validation is performed before durable enqueue in ``process``. Keep
+        # this guard because tests and future callers may invoke the handler
+        # through a different path.
+        if not self._valid_environment(item):
+            return False
+        temperature_c = float(item["temperature_c"])
+        humidity_percent = float(item["humidity_percent"])
         self.fleet.touch(
             item["device_id"], item["received_ts"], **self._metadata(item)
         )
@@ -300,6 +316,28 @@ class EventProcessor:
                 "payload_hex": item.get("payload_hex"),
             }
         )
+        return True
+
+    @staticmethod
+    def _valid_environment(item: dict[str, Any]) -> bool:
+        if item.get("temperature_c") is None or item.get("humidity_percent") is None:
+            LOG.warning("Skipped incomplete environment payload from %s", item["device_id"])
+            return False
+        try:
+            temperature_c = float(item["temperature_c"])
+            humidity_percent = float(item["humidity_percent"])
+        except (TypeError, ValueError):
+            LOG.warning("Skipped non-numeric environment payload from %s", item["device_id"])
+            return False
+        if not -50.0 <= temperature_c <= 100.0 or not 0.0 <= humidity_percent <= 100.0:
+            LOG.warning(
+                "Skipped out-of-range environment payload from %s: temperature=%s humidity=%s",
+                item["device_id"],
+                temperature_c,
+                humidity_percent,
+            )
+            return False
+        return True
 
     def _counter_result(
         self, device_id: str, session_id: str, counter: int

@@ -51,5 +51,29 @@ CREATE TABLE IF NOT EXISTS client_settings (
     updated_at           TEXT NOT NULL
 );
 
+-- Durable store-and-forward queue. Records are never removed automatically;
+-- sent=1 means the remote server acknowledged the same event_id.
+CREATE TABLE IF NOT EXISTS telemetry_outbox (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id        TEXT UNIQUE NOT NULL,
+    event_ts        TEXT NOT NULL,
+    payload_json    TEXT NOT NULL,
+    sent            INTEGER NOT NULL DEFAULT 0,
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    last_attempt_at TEXT,
+    sent_at         TEXT,
+    created_at      TEXT NOT NULL
+);
+
+-- Used by a remote BreathSense gateway/server to make uploads idempotent.
+CREATE TABLE IF NOT EXISTS telemetry_receipts (
+    event_id    TEXT PRIMARY KEY,
+    received_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS ix_cough_client_event
     ON cough_events(client_id, event_ts DESC);
+
+CREATE INDEX IF NOT EXISTS ix_telemetry_outbox_pending
+    ON telemetry_outbox(sent, id);

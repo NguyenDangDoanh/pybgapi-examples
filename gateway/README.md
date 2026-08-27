@@ -8,9 +8,11 @@ xG26 node(s)
 BGM220 NCP + Raspberry Pi BLE host
   -> JSON Lines over /tmp/cough_gw.sock
 Gateway EventProcessor
-  -> SQLite (cough_events + environment_readings + devices)
+  -> SQLite domain tables + durable telemetry_outbox (commit first)
 Flask API
   -> Dash dashboard on port 8050
+Upload worker (independent thread)
+  -> oldest pending event -> remote POST -> ACK event_id -> mark sent
 ```
 
 The active BLE implementation is `gateway/ble_host_modular/`. The older
@@ -31,8 +33,7 @@ Then start the BLE host in another SSH terminal:
 
 ```bash
 source .venv/bin/activate
-PORT="/dev/serial/by-id/usb-Silicon_Labs_J-Link_OB_000440210672-if00"
-python gateway/ble_host_modular/main.py "$PORT" \
+python gateway/ble_host_modular/main.py \
   --xapi api/sl_bt.xapi \
   --name-prefix MyDevice \
   --service-uuid b5e00001-7a4b-4c6d-9e10-112233445566 \
@@ -326,9 +327,9 @@ does not label treatment effective or ineffective.
 
 ## Optional dashboard simulator
 
-Simulated data is never created during normal gateway startup. The default
-command backfills isolated historical scenarios and then keeps generating
-stochastic live events:
+Simulated data is never created during normal gateway startup. The command
+creates one static historical dataset and exits; it does not append live
+events or refresh simulated device status afterward:
 
 ```bash
 python -m gateway.app.simulate_dashboard_data --replace
@@ -338,25 +339,28 @@ python -m gateway.app.simulate_dashboard_data --replace
 device, and message identifiers created by the retired `seed_demo_data.py`.
 Real patient/device rows are not deleted.
 
-Use `--history-only` to backfill and exit, or `--live-only` to append live data
-without a backfill. `--seed` makes the generated history reproducible;
-`--time-scale` accelerates only live waiting intervals and never creates future
-timestamps. `--db /path/to/cough_monitor.db` selects another database.
+`--seed` makes the generated history reproducible. `--db
+/path/to/cough_monitor.db` selects another database.
 
 The scenarios cover stable, worsening, treatment-improving, EWMA warmup, and
 irregular/missing monitoring. Event times are stochastic and circadian, with
 quiet periods, bursts, sparse nighttime events, per-patient cough-type mixes,
-and rare prolonged bouts. All simulator patients, devices, and messages use the
-reserved `dashboard-sim-` prefix. `--replace` removes only those records; real
-gateway data is untouched.
+and rare prolonged bouts. Simulator device and message identifiers retain the
+reserved `dashboard-sim-` prefix so `--replace` can remove only owned records;
+real gateway data is untouched. Patient names shown by the dashboard are:
 
-While live simulation is running, it refreshes each simulated device's
-connectivity status every 10 seconds without creating cough or environment
-rows. This keeps simulated devices Online under the same 30-second freshness
-rule as physical devices without changing their analytics. Per-profile rolling
-24-hour caps keep accelerated live generation from pushing every scenario into
-High Alert; once a cap is reached, only connectivity heartbeats continue until
-older cough events leave the 24-hour window.
+| Scenario | Patient |
+| --- | --- |
+| Irregular / missing | `client_02` |
+| Warning / needs review | `client_03` |
+| Stable | `client_04` |
+| Treatment improving | `client_05` |
+| EWMA warmup | `client_06` |
+| Worsening | `client_07` |
+
+Because the dataset is static, simulated devices naturally become Offline
+under the same freshness rule used for physical devices. Their historical
+events, warning scenarios, charts, and environment samples remain available.
 
 ## BGM220 transport recovery
 
@@ -364,10 +368,39 @@ The BLE host supervises the pyBGAPI reader thread rather than relying only on
 `BGLib.is_open()`. If the BGM220 is unplugged or the reader thread dies, the
 current host stops connected heartbeats, reports every running node
 disconnected, clears stale BLE state, and closes the old BGLib instance. The
-supervisor then creates a new `BleCentral` every 2 seconds until the original
-serial path is available again. Reconnection performs the complete boot, scan,
-GATT discovery, notification setup, and optional time-sync sequence before a
-new connected status is emitted.
+supervisor scans current serial ports every 2 seconds. It ranks Silicon
+Labs/SEGGER/J-Link metadata but does not trust VID alone: every candidate must
+pass a disposable `bt.system.hello()` handshake. The probe is closed, and the
+selected path is used to construct a completely new `SerialConnector`,
+`BGLib`, and `BleCentral`. Therefore `/dev/ttyACM0` may become `ttyACM1` or
+`ttyACM2` without restarting Python. A periodic active hello also detects a
+dead command path even when a device node or reader object still exists.
+
+An explicit positional path is still accepted for compatibility and is tried
+first, but auto-discovery remains the fallback. Use
+`--bgm220-serial-number SERIAL` to select one board when several candidates
+are attached.
+
+## Durable store-and-forward
+
+Every accepted cough/environment message is committed to
+`telemetry_outbox` in the same persistent SQLite file before it can enter the
+remote upload path. The upload worker uses its own short-lived SQLite
+connections, reads pending rows oldest-first, and marks `sent=1` only after a
+2xx response contains an ACK for the identical `event_id`. Failed records are
+never deleted and have no retry limit. Backoff grows from 5 seconds to 5
+minutes, then retries continue indefinitely. The captured `event_ts` and the
+full original JSON payload are retained across Wi-Fi loss, server downtime,
+process restart, and Pi reboot.
+
+`POST /api/telemetry` is the matching idempotent receiver for a remote
+BreathSense server. It stores a `telemetry_receipts` row keyed by `event_id`;
+retries return a duplicate ACK rather than creating a second event.
+
+The queue does not impose a time or record-count retention limit. Disk usage,
+database size, and pending count are logged periodically. Usage at 80% logs a
+warning and 90% logs a critical error; unsent rows are not silently removed.
+Queue status is available at `GET /api/telemetry/queue`.
 
 ## Optional environment variables
 
@@ -378,7 +411,45 @@ export GATEWAY_HOST="0.0.0.0"
 export GATEWAY_PORT="8050"
 export GATEWAY_TIMEZONE="Asia/Ho_Chi_Minh"
 export GATEWAY_LOG_LEVEL="INFO"
+export GATEWAY_UPLOAD_URL="https://server.example/api/telemetry"
+export GATEWAY_UPLOAD_BATCH_SIZE="100"
+export GATEWAY_UPLOAD_TIMEOUT_SECONDS="10"
+export GATEWAY_UPLOAD_BACKOFF_INITIAL_SECONDS="5"
+export GATEWAY_UPLOAD_BACKOFF_MAX_SECONDS="300"
+export GATEWAY_DISK_CHECK_SECONDS="60"
+export GATEWAY_DISK_WARN_PERCENT="80"
+export GATEWAY_DISK_CRITICAL_PERCENT="90"
 ```
+
+Leave `GATEWAY_UPLOAD_URL` unset to keep collecting durable pending telemetry
+without making Internet requests. Setting it later resumes the oldest pending
+row; it does not change the original event timestamp.
+
+## systemd user services
+
+Templates are in `gateway/systemd/`. They use absolute paths derived from
+`%h`, restart crashed processes, and start the BGM220 host in auto-discovery
+mode. Install once on the Pi:
+
+```bash
+mkdir -p ~/.config/systemd/user ~/.config/breathsense
+cp gateway/systemd/breathsense-*.service ~/.config/systemd/user/
+cp gateway/systemd/gateway.env.example ~/.config/breathsense/gateway.env
+systemctl --user daemon-reload
+systemctl --user enable --now \
+  breathsense-dashboard.service breathsense-bgm220.service
+sudo loginctl enable-linger "$USER"
+```
+
+Edit `~/.config/breathsense/gateway.env` before enabling remote upload. The
+simulator is intentionally not an auto-start production service.
+
+### Database migration
+
+No manual data migration is required. Startup adds `telemetry_outbox`,
+`telemetry_receipts`, and their indexes using `CREATE ... IF NOT EXISTS`.
+Existing cough, environment, device, treatment, timestamp, and counter rows are
+left unchanged.
 
 ## Verification
 
@@ -398,4 +469,47 @@ nodes using the same event counter, duplicate replay across reconnect, uint16
 wrap, environment persistence and validation, old-database migration,
 concurrent socket clients, per-connection BLE notification routing, optional
 Time discovery/write, isolated write failure, and fleet-wide UTC-date
-resynchronization.
+resynchronization. Resilience tests additionally cover serial candidate
+ranking, multi-device BGAPI handshake selection, fresh-port resolution after
+transport loss, active hello failure, durable queue persistence, retry without
+deletion, timestamp preservation, and ACK-based completion.
+
+### Raspberry Pi acceptance procedure
+
+Run the dashboard and BLE services through systemd, then follow the cases
+below while watching both logs and the durable queue:
+
+```bash
+journalctl --user -fu breathsense-dashboard.service &
+journalctl --user -fu breathsense-bgm220.service &
+watch -n 2 'curl -s http://127.0.0.1:8050/api/telemetry/queue'
+```
+
+1. Start with BGM220 on `ttyACM0`; verify the scan, successful hello, and node
+   notifications without passing a serial path.
+2. Unplug and reconnect it on the same port; verify disconnect and reconnect
+   without a Python restart.
+3. Force/reproduce a change to `ttyACM1` or `ttyACM2`; verify the newly scanned
+   path is used.
+4. Attach another serial device; verify rejected handshake(s) followed by the
+   BGM220 handshake and selection.
+5. Block the upload destination for 30 minutes while EFR32 continues sending;
+   verify `pending` increases, then returns to zero after access is restored.
+6. Repeat the offline test for one day; there is no offline-duration timeout or
+   retry limit.
+7. Reboot the Pi with pending rows; verify they remain after service startup and
+   upload in FIFO order after network recovery.
+8. Keep Wi-Fi available but stop the server; verify upload failures retain rows,
+   then resume after the server restarts.
+9. POST the same envelope/event ID twice to `/api/telemetry`; verify both calls
+   ACK but only one domain record and one `telemetry_receipts` row exist.
+10. With pending rows and upload blocked, unplug/reconnect BGM220, then restore
+    the server. Verify USB recovery and pending upload proceed independently and
+    neither service crashes.
+
+For cases 5-10, compare event IDs and original event timestamps at the source,
+in `telemetry_outbox`, and at the receiver. A pass requires equal record sets,
+no duplicate event IDs, preserved occurrence timestamps, and no unsent row
+being deleted. Journald stores both service logs and applies the host's normal
+log retention policy; inspect recent history with
+`journalctl --user -u SERVICE --since today`.

@@ -30,6 +30,7 @@ from constants import (
     GATT_NOTIFICATION,
     GATT_PROPERTY_NOTIFY,
     GATT_PROPERTY_WRITE,
+    NCP_HEALTH_CHECK_SECONDS,
     PHY_1M,
     RECONNECT_DELAY_SECONDS,
     SCAN_ACTIVE,
@@ -88,6 +89,7 @@ class BleCentral:
         self.sequence = 0
         self._closed = False
         self._advertisement_debug_after: dict[tuple[str, str], float] = {}
+        self._next_ncp_health_check_at = 0.0
 
     @property
     def connecting(self) -> bool:
@@ -149,6 +151,7 @@ class BleCentral:
                     )
 
                 self._check_timeouts(now)
+                self._check_ncp_health(now)
                 self._check_status_heartbeats(now)
                 self._check_daily_time_sync()
 
@@ -231,6 +234,16 @@ class BleCentral:
             return bool(handler.is_alive())
         except Exception:
             return False
+
+    def _check_ncp_health(self, now: float) -> None:
+        """Actively verify command/response health, not only reader liveness."""
+        if not self.booted or now < getattr(self, "_next_ncp_health_check_at", 0.0):
+            return
+        try:
+            self.lib.bt.system.hello()
+        except Exception as exc:
+            self._raise_transport_lost("system.hello health check", exc)
+        self._next_ncp_health_check_at = now + NCP_HEALTH_CHECK_SECONDS
 
     @staticmethod
     def _raise_transport_lost(operation: str, exc: BaseException) -> None:
@@ -385,7 +398,7 @@ class BleCentral:
     def on_system_boot(self, event: Any) -> None:
         self.booted = True
         LOG.info(
-            "BGM220 Bluetooth stack booted: %d.%d.%d build %d",
+            "[BGM220] connected; Bluetooth stack booted: %d.%d.%d build %d",
             event.major,
             event.minor,
             event.patch,

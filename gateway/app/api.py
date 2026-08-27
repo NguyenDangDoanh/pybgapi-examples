@@ -9,7 +9,9 @@ from flask import Flask, abort, jsonify, request
 from .analytics import Analytics
 from .dao import Dao
 from .device_status import expire_stale_device_status
+from .event_processor import EventProcessor
 from .fleet import Fleet
+from .telemetry_queue import TelemetryQueue
 
 
 def _limit_arg(default: int = 50) -> int:
@@ -23,7 +25,13 @@ def _optional_limit_arg() -> int | None:
     return _limit_arg()
 
 
-def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
+def create_app(
+    dao: Dao,
+    analytics: Analytics,
+    fleet: Fleet,
+    processor: EventProcessor | None = None,
+    telemetry_queue: TelemetryQueue | None = None,
+) -> Flask:
     app = Flask(__name__)
 
     @app.get("/api/clients")
@@ -160,6 +168,41 @@ def create_app(dao: Dao, analytics: Analytics, fleet: Fleet) -> Flask:
     @app.get("/api/environment/recent")
     def recent_environment():
         return jsonify(dao.get_recent_environment(limit=_limit_arg()))
+
+    @app.get("/api/telemetry/queue")
+    def telemetry_queue_status():
+        if telemetry_queue is None:
+            abort(503, description="Durable telemetry queue is not configured")
+        return jsonify(telemetry_queue.stats())
+
+    @app.post("/api/telemetry")
+    def ingest_remote_telemetry():
+        """Idempotent ACK endpoint for another Pi's upload worker."""
+        if processor is None or telemetry_queue is None:
+            abort(503, description="Remote telemetry ingest is not configured")
+        envelope = request.get_json(silent=True)
+        if not isinstance(envelope, dict):
+            abort(400, description="Body must be a JSON object")
+        event_id = envelope.get("event_id")
+        data = envelope.get("data")
+        if not isinstance(event_id, str) or not event_id.strip():
+            abort(400, description="event_id is required")
+        if not isinstance(data, dict):
+            abort(400, description="data must be a JSON object")
+        event_id = event_id.strip()
+        if telemetry_queue.receipt_exists(event_id):
+            return jsonify(
+                {"ack": True, "event_id": event_id, "status": "duplicate"}
+            )
+
+        payload = dict(data)
+        payload["message_id"] = event_id
+        if not payload.get("event_ts") and envelope.get("timestamp"):
+            payload["event_ts"] = envelope["timestamp"]
+        if not processor.process(payload, durable=False):
+            abort(422, description="Telemetry payload was not accepted")
+        telemetry_queue.record_receipt(event_id)
+        return jsonify({"ack": True, "event_id": event_id, "status": "accepted"})
 
     @app.post("/api/feedback")
     def feedback():

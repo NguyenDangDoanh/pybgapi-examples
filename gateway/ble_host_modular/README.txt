@@ -8,8 +8,7 @@ JSON Lines to the local gateway socket.
 
 Example:
 
-PORT="/dev/serial/by-id/usb-Silicon_Labs_J-Link_OB_000440210672-if00"
-python gateway/ble_host_modular/main.py "$PORT" \
+python gateway/ble_host_modular/main.py \
   --xapi api/sl_bt.xapi \
   --name-prefix MyDevice \
   --max-connections 2 \
@@ -33,25 +32,28 @@ Important:
 - The optional writable Time characteristic receives little-endian uint32 Unix
   time after notifications are enabled and again at each UTC midnight. Its
   absence is supported for backward compatibility.
-- If the BGM220 reader thread dies or the serial adapter is unplugged, all
-  running nodes are reported disconnected and a fresh host retries the same
-  serial path every 2 seconds until the NCP returns.
+- If the BGM220 reader thread dies, active hello fails, or USB is unplugged,
+  all running nodes are reported disconnected. Every retry rescans current
+  serial ports, verifies candidates by BGAPI hello, and creates fresh connector,
+  BGLib, reader thread, and host objects. ttyACM numbering may change.
 - Each connection owns its discovery/time-sync state. Time writes are
   asynchronous, and failure on one node does not stop the others.
 - Firmware must keep a monotonic clock running across BLE disconnects and store
   flags, cough_type, captured event_ts, and uint16 event_counter for FIFO replay.
-- Backend delivery is buffered and bounded; SQLite message_id deduplication
-  prevents retries from creating duplicate rows.
+- Remote Internet delivery uses the gateway's persistent SQLite outbox;
+  message_id/event_id deduplication prevents retries from creating duplicate
+  rows. The small BLE socket FIFO is not the Internet offline store.
 - Connection-open and GATT procedure timeouts prevent one bad node from blocking the fleet.
 
 BGM220 hot-unplug / hot-plug recovery
 --------------------------------------
 
-The supervisor owns exactly one BleCentral instance at a time. Reader-thread
+The supervisor owns exactly one BleCentral instance at a time. It scans serial
+metadata and requires a BGAPI hello handshake before selecting a port. Reader-thread
 death, raw serial/connector failures, BGAPI no-response/send-timeout/wrong-
 response errors, and NCP boot timeout are normalized to NcpTransportLost. The
 old BGLib/SerialConnector is closed best effort, the supervisor waits 2 seconds,
-then constructs a completely fresh session. A CommandFailedError is different:
+then rescans and constructs a completely fresh session. A CommandFailedError is different:
 it means the NCP returned a valid response with a Bluetooth status code, so the
 current command/node is handled without blindly rebuilding the NCP.
 
